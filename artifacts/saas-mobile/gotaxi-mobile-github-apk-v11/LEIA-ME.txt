@@ -1,0 +1,26 @@
+GoTaxi Mobile — GitHub APK/AAB v11
+
+Este pacote está organizado para o repositório mobile isolado appgotax.
+Copie os arquivos diretamente para a raiz do repositório, preservando os caminhos.
+
+CORREÇÕES
+- Perfil preview gera build-output.apk.
+- Perfil production gera build-output.aab.
+- GitHub Actions e eas.json usam api.gotaxi.com.br.
+- App atualizado para 2.0.3 / Android versionCode 203.
+- Carrinho do e-commerce inclui Pagamento Direto e Mercado Pago.
+
+PARA GERAR APK
+1. Envie estes arquivos para o GitHub.
+2. Abra Actions > Build Android (APK / AAB).
+3. Clique Run workflow.
+4. Selecione profile: preview.
+5. Aguarde finalizar.
+6. Baixe o artefato gotaxi-android-preview; dentro estará build-output.apk.
+
+PARA GOOGLE PLAY
+Use profile: production. O resultado será build-output.aab.
+
+IMPORTANTE
+O build já iniciado como Build Android AAB (Google Play) é produção e não gera APK instalável.
+Não é necessário republicar API, Admin, PDV ou Landing.
