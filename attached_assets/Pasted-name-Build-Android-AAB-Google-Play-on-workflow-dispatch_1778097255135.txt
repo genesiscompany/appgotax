@@ -1,0 +1,79 @@
+name: Build Android AAB (Google Play)
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Build profile'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - preview
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Android ${{ github.event.inputs.profile || 'production' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli@16.4.0
+
+      - name: Verificar versão
+        run: node -e "const a=require('./app.json'); console.log('version:', a.expo.version, '| versionCode:', a.expo.android.versionCode)"
+
+      - name: Build Android
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_NO_VCS: '1'
+          EXPO_PUBLIC_DOMAIN: 'gotaxi.com.br'
+          GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
+          EXPO_PUBLIC_GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
+        run: |
+          eas build \
+            --platform android \
+            --profile ${{ github.event.inputs.profile || 'production' }} \
+            --local \
+            --non-interactive \
+            --output ./build-output.aab
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: gotaxi-android-v${{ github.run_number }}
+          path: build-output.aab
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Criar Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "build-${{ github.run_number }}" \
+            build-output.aab \
+            --title "GoTaxi Android #${{ github.run_number }}" \
+            --notes "Build #${{ github.run_number }}" \
+            --repo ${{ github.repository }}

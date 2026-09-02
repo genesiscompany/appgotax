@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "SaaS Multi-Empresas"
+version = "1.0.0"
+id = "artifacts/saas-mobile"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+localPort = 25897
+name = "expo"
+paths = ["/"]
+
+[services.development]
+run = "pnpm --filter @workspace/saas-mobile run dev"
+
+[services.env]
+PORT = "25897"
+BASE_PATH = "/"
+
+[services.production]
+build = ["pnpm", "--filter", "@workspace/saas-mobile", "run", "build"]
+run = ["pnpm", "--filter", "@workspace/saas-mobile", "run", "serve"]

@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/afiliados/"
+title = "GoTaxi Afiliados — Hub do Parceiro"
+version = "1.0.0"
+id = "artifacts/afiliados-hub"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/afiliados/" ]
+localPort = 22936
+
+[services.development]
+run = "pnpm --filter @workspace/afiliados-hub run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/afiliados-hub", "run", "build" ]
+publicDir = "artifacts/afiliados-hub/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22936"
+BASE_PATH = "/afiliados/"

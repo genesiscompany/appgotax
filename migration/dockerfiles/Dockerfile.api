@@ -1,0 +1,44 @@
+# =====================================================================
+# GoTaxi — API Server
+# =====================================================================
+
+FROM node:24-slim AS builder
+
+RUN corepack enable && corepack prepare pnpm@10.26.1 --activate
+WORKDIR /repo
+
+# Copy manifests first so dependency installation can be cached.
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
+COPY artifacts/api-server/package.json ./artifacts/api-server/
+COPY lib/db/package.json ./lib/db/
+COPY lib/api-zod/package.json ./lib/api-zod/
+
+RUN pnpm install --frozen-lockfile=false
+
+COPY artifacts/api-server/build.ts artifacts/api-server/tsconfig.json ./artifacts/api-server/
+COPY artifacts/api-server/src ./artifacts/api-server/src
+COPY artifacts/api-server/public ./artifacts/api-server/public
+COPY lib/db/src ./lib/db/src
+COPY lib/api-zod/src ./lib/api-zod/src
+
+ENV NODE_ENV=production
+ENV PORT=8080
+
+RUN pnpm --filter @workspace/api-server run build
+
+# ---------- Stage 2: API runtime ----------
+FROM node:24-slim AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=8080
+
+# The server bundle intentionally leaves selected dependencies external.
+COPY --from=builder /repo/node_modules ./node_modules
+COPY --from=builder /repo/artifacts/api-server/package.json ./artifacts/api-server/package.json
+COPY --from=builder /repo/artifacts/api-server/node_modules ./artifacts/api-server/node_modules
+COPY --from=builder /repo/artifacts/api-server/dist ./artifacts/api-server/dist
+
+EXPOSE 8080
+
+CMD ["node", "artifacts/api-server/dist/index.cjs"]

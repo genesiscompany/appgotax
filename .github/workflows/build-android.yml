@@ -1,0 +1,108 @@
+name: Build Android AAB (Google Play)
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Build profile'
+        required: true
+        default: 'preview'
+        type: choice
+        options:
+          - production
+          - preview
+  push:
+    branches:
+      - main
+    paths:
+      - 'artifacts/saas-mobile/app.json'
+      - 'artifacts/saas-mobile/eas.json'
+      - '.github/workflows/build-android.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Android ${{ github.event.inputs.profile || 'preview' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        working-directory: artifacts/saas-mobile
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Habilitar pnpm 10 via corepack
+        working-directory: ${{ github.workspace }}
+        run: |
+          npm install -g corepack@latest
+          corepack enable
+          corepack prepare pnpm@10.26.1 --activate
+          pnpm --version
+
+      - name: Instalar dependências (pnpm workspace)
+        working-directory: ${{ github.workspace }}
+        env:
+          NPM_CONFIG_NODE_LINKER: hoisted
+          NPM_CONFIG_SHAMEFULLY_HOIST: 'true'
+          NPM_CONFIG_PUBLIC_HOIST_PATTERN: '*'
+          EAS_BUILD: 'true'
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Install EAS CLI
+        working-directory: ${{ github.workspace }}
+        run: npm install -g eas-cli@16.4.0
+
+      - name: Verificar versão e arquivos
+        run: |
+          echo "=== app.json ===" && node -e "const a=require('./app.json'); console.log('version:', a.expo.version, '| versionCode:', a.expo.android.versionCode)"
+          echo "=== eas.json ===" && cat eas.json
+
+      - name: Build Android (local — sem consumir cota EAS)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_NO_VCS: '1'
+          EXPO_PUBLIC_DOMAIN: 'gotaxi.com.br'
+          EXPO_PUBLIC_GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
+        run: |
+          eas build \
+            --platform android \
+            --profile ${{ github.event.inputs.profile || 'preview' }} \
+            --local \
+            --non-interactive \
+            --output ./build-output.aab
+
+      - name: Upload AAB como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: gotaxi-android-${{ github.event.inputs.profile || 'preview' }}-v${{ github.run_number }}
+          path: artifacts/saas-mobile/build-output.aab
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Criar GitHub Release com o AAB
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          TAG="android-${{ github.event.inputs.profile || 'preview' }}-build-${{ github.run_number }}"
+          gh release create "$TAG" \
+            artifacts/saas-mobile/build-output.aab \
+            --title "GoTaxi Android ${{ github.event.inputs.profile || 'preview' }} #${{ github.run_number }}" \
+            --notes "Build automático — Run #${{ github.run_number }}" \
+            --repo ${{ github.repository }}

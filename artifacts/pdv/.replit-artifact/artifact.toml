@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/pdv/"
+title = "GoTaxi PDV — Painel do Parceiro"
+version = "1.0.0"
+id = "artifacts/pdv"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/pdv/" ]
+localPort = 25849
+
+[services.development]
+run = "pnpm --filter @workspace/pdv run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/pdv", "run", "build" ]
+publicDir = "artifacts/pdv/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25849"
+BASE_PATH = "/pdv/"

@@ -1,0 +1,38 @@
+# =====================================================================
+#  GoTaxi — Landing Page (gotaxi.com.br)
+#
+#  Nginx (porta 3000) atua como roteador:
+#    - /afiliados/*  → gotaxi-afiliados:80 (container separado)
+#    - /api/*        → gotaxi-api:8080
+#    - /uploads/*    → gotaxi-api:8080
+#    - tudo mais     → serve.js Node (porta 3001 interna)
+#
+#  No Easypanel:
+#    - Build Path:        / (raiz do repo)
+#    - Dockerfile Path:   migration/dockerfiles/Dockerfile.landing
+#    - Porta exposta:     3000
+# =====================================================================
+
+FROM node:24-alpine
+
+# Instala nginx para rotear /afiliados/* ao container afiliados-hub
+RUN apk add --no-cache nginx && mkdir -p /run/nginx
+
+WORKDIR /app
+
+COPY artifacts/saas-mobile/server ./server
+COPY artifacts/saas-mobile/app.json ./app.json
+
+# Substitui a config padrao do nginx pela nossa
+RUN rm -f /etc/nginx/http.d/default.conf
+COPY migration/nginx/landing.conf /etc/nginx/http.d/default.conf
+
+ENV NODE_ENV=production
+# serve.js escuta na porta 3001 (interna); nginx fica na 3000 (exposta)
+ENV PORT=3001
+
+EXPOSE 3000
+
+# Inicia serve.js em background e nginx em foreground
+# PORT=3001 explícito para evitar conflito com PORT=3000 injetado pelo EasyPanel (porta exposta)
+CMD ["sh", "-c", "PORT=3001 node server/serve.js & exec nginx -g 'daemon off;'"]

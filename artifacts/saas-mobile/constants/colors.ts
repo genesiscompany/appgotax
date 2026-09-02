@@ -1,0 +1,48 @@
+const primary = "#1A56DB";
+const primaryDark = "#1E40AF";
+
+export default {
+  light: {
+    text: "#0F172A",
+    textSecondary: "#64748B",
+    textMuted: "#94A3B8",
+    background: "#F8FAFC",
+    backgroundSecondary: "#F1F5F9",
+    card: "#FFFFFF",
+    border: "#E2E8F0",
+    tint: primary,
+    tintDark: primaryDark,
+    tabIconDefault: "#94A3B8",
+    tabIconSelected: primary,
+    success: "#10B981",
+    warning: "#F59E0B",
+    danger: "#EF4444",
+    info: "#3B82F6",
+  },
+  dark: {
+    text: "#F1F5F9",
+    textSecondary: "#94A3B8",
+    textMuted: "#64748B",
+    background: "#0F172A",
+    backgroundSecondary: "#1E293B",
+    card: "#1E293B",
+    border: "#334155",
+    tint: "#3B82F6",
+    tintDark: "#60A5FA",
+    tabIconDefault: "#64748B",
+    tabIconSelected: "#3B82F6",
+    success: "#10B981",
+    warning: "#F59E0B",
+    danger: "#EF4444",
+    info: "#3B82F6",
+  },
+  modules: {
+    motorista: "#FF6B35",
+    ecommerce: "#4ECDC4",
+    servicos: "#45B7D1",
+    passagens: "#68D391",
+    entrega: "#F0A500",
+    food: "#C36EF0",
+    viagens: "#A78BFA",
+  },
+};

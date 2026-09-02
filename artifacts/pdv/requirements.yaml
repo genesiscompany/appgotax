@@ -1,0 +1,15 @@
+packages:
+  "recharts": "Required for dashboard and report charts"
+  "framer-motion": "Required for smooth page transitions and micro-interactions"
+  "date-fns": "For formatting dates in reports and orders"
+  "lucide-react": "For beautiful consistent icons across the application"
+
+images:
+  - path: "artifacts/pdv/public/images/auth-bg.png"
+    description: "Abstract warm neutral gradient with subtle green light leaks, professional and clean"
+    aspect_ratio: "16:9"
+
+notes:
+  - Application uses a global StoreContext to manage the active module (Alimentação, E-commerce, Serviços) and store status.
+  - All data is mocked in the frontend for demonstration purposes.
+  - Uses shadcn/ui components present in the workspace.

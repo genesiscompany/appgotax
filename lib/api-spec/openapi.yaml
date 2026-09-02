@@ -1,0 +1,1030 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: SaaS Multi-Empresas API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: auth
+    description: Authentication
+  - name: empresas
+    description: Gerenciamento de empresas (tenants)
+  - name: usuarios
+    description: Gerenciamento de usuários
+  - name: motorista
+    description: Módulo Motorista de App
+  - name: ecommerce
+    description: Módulo E-commerce
+  - name: servicos
+    description: Módulo Serviços
+  - name: passagens
+    description: Módulo Passagens
+  - name: entrega
+    description: Módulo Entrega
+  - name: food
+    description: Módulo Food
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Login do usuário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login bem-sucedido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Credenciais inválidas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/register:
+    post:
+      operationId: register
+      tags: [auth]
+      summary: Registro de novo usuário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Usuário criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+
+  /empresas:
+    get:
+      operationId: listEmpresas
+      tags: [empresas]
+      summary: Listar empresas
+      responses:
+        "200":
+          description: Lista de empresas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Empresa"
+    post:
+      operationId: createEmpresa
+      tags: [empresas]
+      summary: Criar empresa
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEmpresaRequest"
+      responses:
+        "201":
+          description: Empresa criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empresa"
+
+  /empresas/{id}:
+    get:
+      operationId: getEmpresa
+      tags: [empresas]
+      summary: Obter empresa por ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Empresa encontrada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Empresa"
+
+  /usuarios:
+    get:
+      operationId: listUsuarios
+      tags: [usuarios]
+      summary: Listar usuários da empresa
+      responses:
+        "200":
+          description: Lista de usuários
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Usuario"
+
+  /modulos:
+    get:
+      operationId: listModulos
+      tags: [empresas]
+      summary: Listar módulos disponíveis/ativos da empresa
+      responses:
+        "200":
+          description: Lista de módulos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Modulo"
+
+  /motorista/corridas:
+    get:
+      operationId: listCorridas
+      tags: [motorista]
+      summary: Listar corridas
+      responses:
+        "200":
+          description: Lista de corridas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Corrida"
+    post:
+      operationId: createCorrida
+      tags: [motorista]
+      summary: Criar corrida
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCorridaRequest"
+      responses:
+        "201":
+          description: Corrida criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Corrida"
+
+  /ecommerce/produtos:
+    get:
+      operationId: listProdutos
+      tags: [ecommerce]
+      summary: Listar produtos
+      responses:
+        "200":
+          description: Lista de produtos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Produto"
+    post:
+      operationId: createProduto
+      tags: [ecommerce]
+      summary: Criar produto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProdutoRequest"
+      responses:
+        "201":
+          description: Produto criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Produto"
+
+  /ecommerce/pedidos:
+    get:
+      operationId: listPedidos
+      tags: [ecommerce]
+      summary: Listar pedidos
+      responses:
+        "200":
+          description: Lista de pedidos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pedido"
+
+  /servicos/categorias:
+    get:
+      operationId: listCategoriasServicos
+      tags: [servicos]
+      summary: Listar categorias de serviços
+      responses:
+        "200":
+          description: Lista de categorias
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CategoriaServico"
+
+  /servicos/agendamentos:
+    get:
+      operationId: listAgendamentos
+      tags: [servicos]
+      summary: Listar agendamentos
+      responses:
+        "200":
+          description: Lista de agendamentos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Agendamento"
+    post:
+      operationId: createAgendamento
+      tags: [servicos]
+      summary: Criar agendamento
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAgendamentoRequest"
+      responses:
+        "201":
+          description: Agendamento criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agendamento"
+
+  /passagens/rotas:
+    get:
+      operationId: listRotas
+      tags: [passagens]
+      summary: Listar rotas disponíveis
+      responses:
+        "200":
+          description: Lista de rotas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Rota"
+
+  /passagens/reservas:
+    get:
+      operationId: listReservas
+      tags: [passagens]
+      summary: Listar reservas
+      responses:
+        "200":
+          description: Lista de reservas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Reserva"
+    post:
+      operationId: createReserva
+      tags: [passagens]
+      summary: Criar reserva
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateReservaRequest"
+      responses:
+        "201":
+          description: Reserva criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reserva"
+
+  /entrega/entregas:
+    get:
+      operationId: listEntregas
+      tags: [entrega]
+      summary: Listar entregas
+      responses:
+        "200":
+          description: Lista de entregas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Entrega"
+    post:
+      operationId: createEntrega
+      tags: [entrega]
+      summary: Criar entrega
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEntregaRequest"
+      responses:
+        "201":
+          description: Entrega criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entrega"
+
+  /food/restaurantes:
+    get:
+      operationId: listRestaurantes
+      tags: [food]
+      summary: Listar restaurantes
+      responses:
+        "200":
+          description: Lista de restaurantes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Restaurante"
+
+  /food/cardapio/{restauranteId}:
+    get:
+      operationId: getCardapio
+      tags: [food]
+      summary: Obter cardápio do restaurante
+      parameters:
+        - name: restauranteId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Cardápio do restaurante
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ItemCardapio"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+      required:
+        - error
+        - message
+
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        senha:
+          type: string
+        empresaCodigo:
+          type: string
+      required:
+        - email
+        - senha
+
+    RegisterRequest:
+      type: object
+      properties:
+        nome:
+          type: string
+        email:
+          type: string
+          format: email
+        senha:
+          type: string
+        telefone:
+          type: string
+        empresaId:
+          type: integer
+      required:
+        - nome
+        - email
+        - senha
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        usuario:
+          $ref: "#/components/schemas/Usuario"
+        empresa:
+          $ref: "#/components/schemas/Empresa"
+      required:
+        - token
+        - usuario
+
+    Empresa:
+      type: object
+      properties:
+        id:
+          type: integer
+        nome:
+          type: string
+        codigo:
+          type: string
+        logo:
+          type: string
+          nullable: true
+        corPrimaria:
+          type: string
+        plano:
+          type: string
+          enum: [basico, profissional, enterprise]
+        modulosAtivos:
+          type: array
+          items:
+            type: string
+        ativo:
+          type: boolean
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - nome
+        - codigo
+        - corPrimaria
+        - plano
+        - modulosAtivos
+        - ativo
+        - criadoEm
+
+    CreateEmpresaRequest:
+      type: object
+      properties:
+        nome:
+          type: string
+        codigo:
+          type: string
+        corPrimaria:
+          type: string
+        plano:
+          type: string
+          enum: [basico, profissional, enterprise]
+        modulosAtivos:
+          type: array
+          items:
+            type: string
+      required:
+        - nome
+        - codigo
+        - plano
+
+    Usuario:
+      type: object
+      properties:
+        id:
+          type: integer
+        nome:
+          type: string
+        email:
+          type: string
+        telefone:
+          type: string
+          nullable: true
+        avatar:
+          type: string
+          nullable: true
+        papel:
+          type: string
+          enum: [admin, operador, cliente, motorista, entregador]
+        empresaId:
+          type: integer
+        ativo:
+          type: boolean
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - nome
+        - email
+        - papel
+        - empresaId
+        - ativo
+        - criadoEm
+
+    Modulo:
+      type: object
+      properties:
+        id:
+          type: string
+        nome:
+          type: string
+        descricao:
+          type: string
+        icone:
+          type: string
+        ativo:
+          type: boolean
+        cor:
+          type: string
+      required:
+        - id
+        - nome
+        - descricao
+        - icone
+        - ativo
+        - cor
+
+    Corrida:
+      type: object
+      properties:
+        id:
+          type: integer
+        passageiroNome:
+          type: string
+        origemEndereco:
+          type: string
+        destinoEndereco:
+          type: string
+        status:
+          type: string
+          enum: [aguardando, aceita, em_andamento, concluida, cancelada]
+        valor:
+          type: number
+        distanciaKm:
+          type: number
+          nullable: true
+        motoristaNome:
+          type: string
+          nullable: true
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - passageiroNome
+        - origemEndereco
+        - destinoEndereco
+        - status
+        - valor
+        - criadoEm
+
+    CreateCorridaRequest:
+      type: object
+      properties:
+        passageiroNome:
+          type: string
+        passageirTelefone:
+          type: string
+        origemEndereco:
+          type: string
+        destinoEndereco:
+          type: string
+        valor:
+          type: number
+      required:
+        - passageiroNome
+        - origemEndereco
+        - destinoEndereco
+        - valor
+
+    Produto:
+      type: object
+      properties:
+        id:
+          type: integer
+        nome:
+          type: string
+        descricao:
+          type: string
+          nullable: true
+        preco:
+          type: number
+        precoPromocional:
+          type: number
+          nullable: true
+        estoque:
+          type: integer
+        categoria:
+          type: string
+        imagem:
+          type: string
+          nullable: true
+        ativo:
+          type: boolean
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - nome
+        - preco
+        - estoque
+        - categoria
+        - ativo
+        - criadoEm
+
+    CreateProdutoRequest:
+      type: object
+      properties:
+        nome:
+          type: string
+        descricao:
+          type: string
+        preco:
+          type: number
+        estoque:
+          type: integer
+        categoria:
+          type: string
+      required:
+        - nome
+        - preco
+        - estoque
+        - categoria
+
+    Pedido:
+      type: object
+      properties:
+        id:
+          type: integer
+        clienteNome:
+          type: string
+        itens:
+          type: array
+          items:
+            type: object
+            properties:
+              produtoId:
+                type: integer
+              produtoNome:
+                type: string
+              quantidade:
+                type: integer
+              precoUnitario:
+                type: number
+            required:
+              - produtoId
+              - produtoNome
+              - quantidade
+              - precoUnitario
+        total:
+          type: number
+        status:
+          type: string
+          enum: [pendente, confirmado, em_preparo, enviado, entregue, cancelado]
+        enderecoEntrega:
+          type: string
+          nullable: true
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - clienteNome
+        - itens
+        - total
+        - status
+        - criadoEm
+
+    CategoriaServico:
+      type: object
+      properties:
+        id:
+          type: integer
+        nome:
+          type: string
+        icone:
+          type: string
+          nullable: true
+        cor:
+          type: string
+          nullable: true
+      required:
+        - id
+        - nome
+
+    Agendamento:
+      type: object
+      properties:
+        id:
+          type: integer
+        clienteNome:
+          type: string
+        servicoNome:
+          type: string
+        prestadorNome:
+          type: string
+          nullable: true
+        dataHora:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [agendado, confirmado, em_andamento, concluido, cancelado]
+        valor:
+          type: number
+          nullable: true
+        observacoes:
+          type: string
+          nullable: true
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - clienteNome
+        - servicoNome
+        - dataHora
+        - status
+        - criadoEm
+
+    CreateAgendamentoRequest:
+      type: object
+      properties:
+        clienteNome:
+          type: string
+        clienteTelefone:
+          type: string
+        categoriaId:
+          type: integer
+        servicoNome:
+          type: string
+        dataHora:
+          type: string
+          format: date-time
+        valor:
+          type: number
+        observacoes:
+          type: string
+      required:
+        - clienteNome
+        - categoriaId
+        - servicoNome
+        - dataHora
+
+    Rota:
+      type: object
+      properties:
+        id:
+          type: integer
+        origem:
+          type: string
+        destino:
+          type: string
+        horarioPartida:
+          type: string
+        horarioChegada:
+          type: string
+        preco:
+          type: number
+        assentosDisponiveis:
+          type: integer
+        totalAssentos:
+          type: integer
+        empresa:
+          type: string
+          nullable: true
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - origem
+        - destino
+        - horarioPartida
+        - horarioChegada
+        - preco
+        - assentosDisponiveis
+        - totalAssentos
+        - criadoEm
+
+    Reserva:
+      type: object
+      properties:
+        id:
+          type: integer
+        rotaId:
+          type: integer
+        passageiroNome:
+          type: string
+        passageiroDocumento:
+          type: string
+          nullable: true
+        assento:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pendente, confirmada, cancelada]
+        total:
+          type: number
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - rotaId
+        - passageiroNome
+        - status
+        - total
+        - criadoEm
+
+    CreateReservaRequest:
+      type: object
+      properties:
+        rotaId:
+          type: integer
+        passageiroNome:
+          type: string
+        passageiroDocumento:
+          type: string
+        passageiroTelefone:
+          type: string
+        assento:
+          type: string
+      required:
+        - rotaId
+        - passageiroNome
+
+    Entrega:
+      type: object
+      properties:
+        id:
+          type: integer
+        remetenteNome:
+          type: string
+        destinatarioNome:
+          type: string
+        enderecoColeta:
+          type: string
+        enderecoEntrega:
+          type: string
+        descricaoPacote:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [aguardando, coletado, em_transito, entregue, devolvido, cancelado]
+        entregadorNome:
+          type: string
+          nullable: true
+        valor:
+          type: number
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - remetenteNome
+        - destinatarioNome
+        - enderecoColeta
+        - enderecoEntrega
+        - status
+        - valor
+        - criadoEm
+
+    CreateEntregaRequest:
+      type: object
+      properties:
+        remetenteNome:
+          type: string
+        remetenteTelefone:
+          type: string
+        destinatarioNome:
+          type: string
+        destinatarioTelefone:
+          type: string
+        enderecoColeta:
+          type: string
+        enderecoEntrega:
+          type: string
+        descricaoPacote:
+          type: string
+        valor:
+          type: number
+      required:
+        - remetenteNome
+        - destinatarioNome
+        - enderecoColeta
+        - enderecoEntrega
+        - valor
+
+    Restaurante:
+      type: object
+      properties:
+        id:
+          type: integer
+        nome:
+          type: string
+        descricao:
+          type: string
+          nullable: true
+        categoria:
+          type: string
+        tempoEntregaMin:
+          type: integer
+        avaliacaoMedia:
+          type: number
+          nullable: true
+        taxaEntrega:
+          type: number
+        aberto:
+          type: boolean
+        imagem:
+          type: string
+          nullable: true
+        criadoEm:
+          type: string
+          format: date-time
+      required:
+        - id
+        - nome
+        - categoria
+        - tempoEntregaMin
+        - taxaEntrega
+        - aberto
+        - criadoEm
+
+    ItemCardapio:
+      type: object
+      properties:
+        id:
+          type: integer
+        restauranteId:
+          type: integer
+        nome:
+          type: string
+        descricao:
+          type: string
+          nullable: true
+        preco:
+          type: number
+        categoria:
+          type: string
+        imagem:
+          type: string
+          nullable: true
+        disponivel:
+          type: boolean
+      required:
+        - id
+        - restauranteId
+        - nome
+        - preco
+        - categoria
+        - disponivel

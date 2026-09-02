@@ -1,0 +1,12 @@
+KEYSTORE PARA UPLOAD - GoTaxi Brasil Plus (br.gotaxi.app)
+========================================================
+
+Arquivo: upload-keystore.jks
+Tipo:    JKS
+
+SENHA DO KEYSTORE: 3cde8515b48f6ce749dcb3e43228c0a3
+ALIAS:             3a565e04d94a816b25f37115c8ca7df9
+SENHA DO ALIAS:    7e2a2b390afae99df07b019abe80899e
+
+IMPORTANTE: guarde este arquivo em local seguro.
+Se perder, será preciso solicitar reset da chave de upload no Play Console.

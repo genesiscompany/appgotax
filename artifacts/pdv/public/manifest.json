@@ -1,0 +1,25 @@
+{
+  "name": "GoTaxi PDV — Painel do Parceiro",
+  "short_name": "GoTaxi PDV",
+  "description": "Painel de gestão para parceiros GoTaxi",
+  "start_url": "/pdv/",
+  "scope": "/pdv/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#ffffff",
+  "theme_color": "#7c3aed",
+  "icons": [
+    {
+      "src": "/pdv/pwa-icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/pdv/pwa-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

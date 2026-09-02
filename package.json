@@ -1,0 +1,18 @@
+{
+  "name": "workspace",
+  "version": "0.0.0",
+  "license": "MIT",
+  "packageManager": "pnpm@10.26.1",
+  "scripts": {
+    "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; npm/*) [ \"$EAS_BUILD\" = \"true\" ] && exit 0 || (echo \"Use pnpm instead\" >&2; exit 1) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
+    "eas-build-pre-install": "npm install -g corepack@latest && corepack enable && corepack prepare pnpm@10.26.1 --activate && NPM_CONFIG_NODE_LINKER=hoisted NPM_CONFIG_SHAMEFULLY_HOIST=true NPM_CONFIG_PUBLIC_HOIST_PATTERN='*' pnpm install --no-frozen-lockfile && echo '=== ROOT node_modules (expo packages) ===' && ls node_modules 2>/dev/null | grep -i ^expo || echo 'NO EXPO AT ROOT' && echo '=== saas-mobile node_modules ===' && ls artifacts/saas-mobile/node_modules 2>/dev/null | head -20 || echo 'no saas-mobile nm'",
+    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+  },
+  "private": true,
+  "devDependencies": {
+    "typescript": "~5.9.2",
+    "prettier": "^3.8.1"
+  }
+}
