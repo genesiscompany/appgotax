@@ -16,7 +16,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_DOMAIN": "gotaxi.com.br"
+        "EXPO_PUBLIC_DOMAIN": "api.gotaxi.com.br"
       }
     },
     "production": {
@@ -24,7 +24,7 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_DOMAIN": "gotaxi.com.br"
+        "EXPO_PUBLIC_DOMAIN": "api.gotaxi.com.br"
       }
     }
   },
