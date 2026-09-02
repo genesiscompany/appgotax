@@ -13,7 +13,19 @@ const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "mercadopago", label: "Mercado Pago (Beta)", icon: Wallet },
 ];
 
-const PROD_BASE = "https://admin.gotaxi.com.br";
+const PROD_BASE = "https://gotaxiplus.replit.app";
+const PAYMENTS_API_BASE = (() => {
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (configured) {
+    const normalized = configured.replace(/\/$/, "");
+    return normalized.endsWith("/api") ? normalized : `${normalized}/api`;
+  }
+  if (typeof window !== "undefined" && window.location.hostname.startsWith("admin.")) {
+    const apiHost = window.location.hostname.replace(/^admin\./, "api.");
+    return `${window.location.protocol}//${apiHost}/api`;
+  }
+  return "/api";
+})();
 
 export default function ConfiguracoesSistema() {
   const { token } = useAuth();
@@ -61,10 +73,12 @@ export default function ConfiguracoesSistema() {
   }, [location]);
 
   useEffect(() => {
+    if (!token) return;
+    setLoading(true);
     Promise.all([
       fetch(`${API}/configuracoes/admin`, { headers: hdrs }).then(r => r.json()),
-      fetch(`/api/payments/admin/fees`, { headers: hdrs }).then(r => r.ok ? r.json() : null),
-      fetch(`/api/payments/admin/config`, { headers: hdrs }).then(r => r.ok ? r.json() : null),
+      fetch(`${PAYMENTS_API_BASE}/payments/admin/fees`, { headers: hdrs }).then(r => r.ok ? r.json() : null),
+      fetch(`${PAYMENTS_API_BASE}/payments/admin/config`, { headers: hdrs }).then(r => r.ok ? r.json() : null),
     ])
       .then(([d, mp, config]) => {
         if (d && d.sistema) setSistema(prev => ({ ...prev, ...d.sistema }));
@@ -89,7 +103,7 @@ export default function ConfiguracoesSistema() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [token]);
 
   async function handleSave() {
     setSaving(true);
@@ -120,26 +134,14 @@ export default function ConfiguracoesSistema() {
         enabled: mpCredentials.enabled,
       };
       if (mpCredentials.accessToken.trim()) configBody.accessToken = mpCredentials.accessToken.trim();
-      const [feesResponse, configResponse] = await Promise.all([
-        fetch(`/api/payments/admin/fees`, {
-          method: "PUT",
-          headers: hdrs,
-          body: JSON.stringify({
-            pix: Math.round(mpFees.pix * 100),
-            card: Math.round(mpFees.card * 100),
-            wallet: Math.round(mpFees.wallet * 100)
-          }),
-        }),
-        fetch(`/api/payments/admin/config`, {
-          method: "PUT",
-          headers: hdrs,
-          body: JSON.stringify(configBody),
-        }),
-      ]);
-      if (!feesResponse.ok || !configResponse.ok) {
-        const failed = !configResponse.ok ? configResponse : feesResponse;
-        const err = await failed.json().catch(() => ({}));
-        throw new Error(err.message || err.error || "Erro ao salvar taxas.");
+      const configResponse = await fetch(`${PAYMENTS_API_BASE}/payments/admin/config`, {
+        method: "PUT",
+        headers: hdrs,
+        body: JSON.stringify(configBody),
+      });
+      if (!configResponse.ok) {
+        const err = await configResponse.json().catch(() => ({}));
+        throw new Error(err.message || err.error || `Erro ao salvar Mercado Pago (${configResponse.status}).`);
       }
       const updatedConfig = await configResponse.json();
       setMpCredentials(prev => ({
@@ -150,6 +152,20 @@ export default function ConfiguracoesSistema() {
         configured: !!updatedConfig.configured,
       }));
       setSavedMp(true);
+
+      const feesResponse = await fetch(`${PAYMENTS_API_BASE}/payments/admin/fees`, {
+        method: "PUT",
+        headers: hdrs,
+        body: JSON.stringify({
+          pix: Math.round(mpFees.pix * 100),
+          card: Math.round(mpFees.card * 100),
+          wallet: Math.round(mpFees.wallet * 100)
+        }),
+      });
+      if (!feesResponse.ok) {
+        const err = await feesResponse.json().catch(() => ({}));
+        throw new Error(`Mercado Pago salvo, mas as taxas não foram salvas: ${err.message || err.error || `erro ${feesResponse.status}`}`);
+      }
       setTimeout(() => setSavedMp(false), 3000);
     } catch (err: any) {
       setMpError(err.message || "Erro de conexão.");
@@ -445,6 +461,12 @@ export default function ConfiguracoesSistema() {
                 </p>
               </div>
             </div>
+            {mpError && (
+              <div role="alert" className="mt-4 flex items-start gap-2 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
+                <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                <span>{mpError}</span>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
@@ -485,6 +507,12 @@ export default function ConfiguracoesSistema() {
                 className="h-4 w-4 accent-primary"
               />
             </label>
+            {!mpCredentials.configured && (
+              <div className="mt-3 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>Informe a Public Key e o Access Token antes de ativar. Se as credenciais já estiverem configuradas no servidor, atualize a página para carregar o status.</span>
+              </div>
+            )}
           </div>
 
           <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-6">
@@ -561,12 +589,6 @@ export default function ConfiguracoesSistema() {
               </div>
             </div>
 
-            {mpError && (
-              <div className="mt-5 flex items-center gap-2 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
-                <AlertCircle size={16} />
-                {mpError}
-              </div>
-            )}
           </div>
           
           <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-700">
