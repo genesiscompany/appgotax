@@ -26,6 +26,7 @@ import placesRouter from "./places";
 import subcategoriasAlimentacaoRouter from "./subcategorias-alimentacao";
 import chatRouter from "./chat";
 import financeiroRouter from "./financeiro";
+import paymentsRouter from "./payments";
 import { pdvRouter as suportePdvRouter, adminRouter as suporteAdminRouter } from "./suporte";
 
 const router: IRouter = Router();
@@ -70,6 +71,7 @@ router.use("/places", placesRouter);
 router.use("/subcategorias-alimentacao", subcategoriasAlimentacaoRouter);
 router.use("/chat", chatRouter);
 router.use("/pdv/financeiro", financeiroRouter);
+router.use("/payments", paymentsRouter);
 router.use("/pdv/suporte", suportePdvRouter);
 router.use("/admin/suporte", suporteAdminRouter);
 

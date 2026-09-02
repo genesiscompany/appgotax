@@ -192,6 +192,81 @@ async function runStartupMigrations() {
          AND empresa_id <> 1`,
 
     `ALTER TABLE empresas ADD COLUMN IF NOT EXISTS indicado_por VARCHAR(20)`,
+    `ALTER TABLE empresas ADD COLUMN IF NOT EXISTS numero_conta_mercado_pago VARCHAR(100)`,
+    `CREATE TABLE IF NOT EXISTS mercado_pago_config (
+      id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      public_key TEXT,
+      encrypted_access_token TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `INSERT INTO mercado_pago_config (id, enabled) VALUES (1, false) ON CONFLICT (id) DO NOTHING`,
+    `CREATE TABLE IF NOT EXISTS payment_fees (
+      id SERIAL PRIMARY KEY,
+      method TEXT NOT NULL UNIQUE,
+      percentage_basis_points INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `INSERT INTO payment_fees (method, percentage_basis_points) VALUES
+      ('pix', 0), ('card', 0), ('wallet', 0)
+      ON CONFLICT (method) DO NOTHING`,
+    `CREATE TABLE IF NOT EXISTS empresa_mercado_pago_configs (
+      id SERIAL PRIMARY KEY,
+      empresa_id INTEGER NOT NULL UNIQUE,
+      public_key TEXT,
+      encrypted_access_token TEXT,
+      mercado_pago_user_id TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      direct_payment_enabled BOOLEAN NOT NULL DEFAULT true,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS payment_transactions (
+      id SERIAL PRIMARY KEY,
+      empresa_id INTEGER,
+      customer_id INTEGER,
+      module TEXT NOT NULL,
+      reference_id TEXT NOT NULL,
+      payment_source TEXT NOT NULL,
+      method TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      gross_amount_cents INTEGER NOT NULL,
+      platform_fee_cents INTEGER NOT NULL DEFAULT 0,
+      provider_preference_id TEXT,
+      provider_payment_id TEXT,
+      init_point TEXT,
+      sandbox_init_point TEXT,
+      external_reference TEXT NOT NULL UNIQUE,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS customer_wallet_accounts (
+      id SERIAL PRIMARY KEY,
+      customer_id INTEGER NOT NULL UNIQUE,
+      balance_cents INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS customer_wallet_ledger (
+      id SERIAL PRIMARY KEY,
+      wallet_account_id INTEGER NOT NULL,
+      customer_id INTEGER NOT NULL,
+      transaction_id INTEGER,
+      direction TEXT NOT NULL,
+      amount_cents INTEGER NOT NULL,
+      balance_after_cents INTEGER NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      description TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS customer_wallet_ledger_idempotency_key_idx ON customer_wallet_ledger (idempotency_key)`,
+    `CREATE TABLE IF NOT EXISTS mercado_pago_webhook_events (
+      id SERIAL PRIMARY KEY,
+      provider_event_id TEXT NOT NULL UNIQUE,
+      provider_payment_id TEXT,
+      event_type TEXT,
+      processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
     `ALTER TABLE motoristas_app ADD COLUMN IF NOT EXISTS email VARCHAR(255)`,
 
     `ALTER TABLE produtos_pdv ADD COLUMN IF NOT EXISTS tamanhos JSONB`,
