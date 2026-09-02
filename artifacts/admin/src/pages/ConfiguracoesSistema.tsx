@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useAuth, API, authHeaders } from "@/lib/auth";
+import { useAuth, authHeaders } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { FileText, Shield, Users, Save, ExternalLink, CheckCircle, ChevronDown, ChevronUp, Car, Wallet, AlertCircle, Loader2 } from "lucide-react";
 
@@ -14,6 +14,7 @@ const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
 ];
 
 const PROD_BASE = "https://admin.gotaxi.com.br";
+const CONFIG_API = "/api/configuracoes/admin";
 const PAYMENTS_API_BASE = (() => {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
   if (configured) {
@@ -76,7 +77,7 @@ export default function ConfiguracoesSistema() {
     if (!token) return;
     setLoading(true);
     Promise.all([
-      fetch(`${API}/configuracoes/admin`, { headers: hdrs }).then(r => r.json()),
+      fetch(CONFIG_API, { headers: hdrs }).then(r => r.json()),
       fetch(`${PAYMENTS_API_BASE}/payments/admin/fees`, { headers: hdrs }).then(r => r.ok ? r.json() : null),
       fetch(`${PAYMENTS_API_BASE}/payments/admin/config`, { headers: hdrs }).then(r => r.ok ? r.json() : null),
     ])
@@ -108,7 +109,7 @@ export default function ConfiguracoesSistema() {
   async function handleSave() {
     setSaving(true);
     try {
-      await fetch(`${API}/configuracoes/admin`, {
+      await fetch(CONFIG_API, {
         method: "PATCH",
         headers: hdrs,
         body: JSON.stringify({ sistema, afiliados }),
