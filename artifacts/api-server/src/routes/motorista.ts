@@ -1,6 +1,7 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
+import { customerIdFromRequest } from "../lib/customerToken";
 
 const router: IRouter = Router();
 
@@ -85,26 +86,55 @@ router.post("/solicitar", async (req, res) => {
     const {
       empresa_id, passageiro_nome, passageiro_telefone,
       origem_endereco, destino_endereco, tipo_veiculo, categoria_nome,
-      forma_pagamento, distancia_km, valor,
+      forma_pagamento, payment_source, distancia_km, valor,
       lat_origem, lng_origem, lat_destino, lng_destino, observacoes,
     } = req.body;
     const empresaId = Number(empresa_id || 1);
-    const km = Number(distancia_km) || 5;
     // Whitelist enum-like fields to prevent SQL injection (these are interpolated into raw SQL below)
     const ALLOWED_TIPOS = new Set(["economico", "conforto", "premium", "GoTaxi X", "GoTaxi Plus", "GoTaxi Black"]);
     const ALLOWED_PAG = new Set(["pix", "dinheiro", "credito", "debito", "vr", "sodexo", "credito_gotaxi"]);
+    const ALLOWED_PAYMENT_SOURCES = new Set(["direto", "mercado_pago", "wallet"]);
     const tipoSafe = ALLOWED_TIPOS.has(String(tipo_veiculo)) ? String(tipo_veiculo) : "economico";
     const pagSafe = ALLOWED_PAG.has(String(forma_pagamento)) ? String(forma_pagamento) : "dinheiro";
-    const valorFinal = valor ?? calcPreco(tipoSafe, km);
+    const rawPaymentSource = payment_source === undefined ? "direto" : String(payment_source);
+    const paymentSource = rawPaymentSource === "carteira" ? "wallet" : rawPaymentSource;
+    if (!ALLOWED_PAYMENT_SOURCES.has(paymentSource)) {
+      return res.status(400).json({ error: "payment_source_invalido", message: "payment_source deve ser direto, mercado_pago ou wallet" });
+    }
+    const coords = [lat_origem, lng_origem, lat_destino, lng_destino].map(Number);
+    const validCoords = coords.every(Number.isFinite)
+      && Math.abs(coords[0]) <= 90 && Math.abs(coords[2]) <= 90
+      && Math.abs(coords[1]) <= 180 && Math.abs(coords[3]) <= 180;
+    let quotedKm: number | null = null;
+    if (validCoords) {
+      const [lat1, lng1, lat2, lng2] = coords.map(x => x * Math.PI / 180);
+      const h = Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lng2 - lng1) / 2) ** 2;
+      quotedKm = Math.max(0.1, Math.round(6371 * 2 * Math.asin(Math.sqrt(h)) * 100) / 100);
+    }
+    const requestedCategory = String(categoria_nome || tipo_veiculo || "");
+    const tariffRows = requestedCategory
+      ? await db.execute(sql`SELECT nome, taxa_minima, taxa_por_km FROM categorias_corrida WHERE nome = ${requestedCategory} AND ativo = true LIMIT 1`)
+      : { rows: [] };
+    const tariff = tariffRows.rows[0] as any;
+    if (paymentSource !== "direto" && (!quotedKm || !tariff)) {
+      return res.status(422).json({ error: "authoritative_quote_unavailable", message: "Coordenadas válidas e categoria ativa são obrigatórias para pagamento pelo app" });
+    }
+    const km = quotedKm ?? (Number(distancia_km) || 5);
+    const serverPrice = tariff ? Math.max(Number(tariff.taxa_minima), Number(tariff.taxa_por_km) * km) : null;
+    const valorFinal = serverPrice != null ? Math.round(serverPrice * 100) / 100 : (valor ?? calcPreco(tipoSafe, km));
 
+    // Persist authenticated ownership so a later payment intent cannot be staged by another customer.
+    const authToken = req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
+    const signedCustomerId = customerIdFromRequest(req);
+    let clienteId: number | null = signedCustomerId ?? (paymentSource === "direto" ? decodeClienteToken(authToken) : null);
+    if (paymentSource !== "direto" && !signedCustomerId) {
+      return res.status(401).json({ error: "signed_customer_token_required" });
+    }
+    await db.execute(sql`ALTER TABLE corridas ADD COLUMN IF NOT EXISTS customer_id INTEGER`);
     // Handle Crédito GoTaxi payment: deduct from credito_aplicativo before creating ride
     let creditoDescontado = 0;
-    let clienteId: number | null = null;
-    if (forma_pagamento === "credito_gotaxi") {
-      const auth = req.headers.authorization;
-      const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-      if (!token) return res.status(401).json({ error: "unauthorized", message: "Token necessário para pagamento com crédito" });
-      clienteId = decodeClienteToken(token);
+    if (forma_pagamento === "credito_gotaxi" && paymentSource !== "wallet") {
+      if (!authToken) return res.status(401).json({ error: "unauthorized", message: "Token necessário para pagamento com crédito" });
       if (!clienteId) return res.status(401).json({ error: "invalid_token" });
 
       const userRows = (await db.execute(sql`SELECT credito_aplicativo FROM usuarios WHERE id = ${clienteId}`)).rows as any[];
@@ -120,18 +150,19 @@ router.post("/solicitar", async (req, res) => {
     // Create main corrida record
     const rows = await db.execute(`
       INSERT INTO corridas (
-        empresa_id, passageiro_nome, passageiro_telefone,
+         empresa_id, customer_id, passageiro_nome, passageiro_telefone,
         origem_endereco, destino_endereco, tipo_veiculo,
-        forma_pagamento, distancia_km, valor, status, tempo_espera_min,
+         forma_pagamento, payment_source, distancia_km, valor, status, tempo_espera_min,
         lat_origem, lng_origem, lat_destino, lng_destino, observacoes
       ) VALUES (
-        ${empresaId},
+         ${empresaId}, ${clienteId ?? "NULL"},
         '${esc(String(passageiro_nome || "Cliente"))}',
         ${passageiro_telefone ? `'${esc(String(passageiro_telefone))}'` : "NULL"},
         '${esc(String(origem_endereco || ""))}',
         '${esc(String(destino_endereco || ""))}',
         '${tipoSafe}',
         '${pagSafe}',
+         '${paymentSource}',
         ${km}, ${Number(valorFinal)}, 'aguardando',
         ${estimaEspera(tipoSafe)},
         ${lat_origem ?? "NULL"}, ${lng_origem ?? "NULL"},
@@ -160,6 +191,10 @@ router.post("/solicitar", async (req, res) => {
           WHERE ma.online = true AND ma.lat IS NOT NULL AND ma.lng IS NOT NULL
             AND ma.ultimo_ping > NOW() - INTERVAL '3 minutes'
             AND ma.status = 'aprovado'
+             AND (
+               ('${paymentSource}' = 'direto' AND ma.aceita_pagamento_direto = true)
+                OR ('${paymentSource}' IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true)
+             )
             ${catFilter}
           ORDER BY (
             6371 * acos(LEAST(1.0,
@@ -187,7 +222,7 @@ router.post("/solicitar", async (req, res) => {
               distancia_motorista_km, tempo_motorista_min,
               distancia_viagem_km, tempo_viagem_min,
               lat_origem, lng_origem, lat_destino, lng_destino,
-              cliente_nome, forma_pagamento,
+               cliente_nome, forma_pagamento, payment_source,
               status, expira_em
             ) VALUES (
               ${driver.id}, ${corrida.id}, 'corrida',
@@ -202,6 +237,7 @@ router.post("/solicitar", async (req, res) => {
               ${lng_destino != null ? Number(lng_destino) : "NULL"},
               '${esc(String(passageiro_nome || "Passageiro"))}',
               '${pagSafe}',
+               '${paymentSource}',
               'aguardando', NOW() + INTERVAL '60 seconds'
             )
           `);
@@ -325,31 +361,10 @@ router.post("/corridas/:id/aceitar", async (req, res) => {
 
 // ── PATCH /api/motorista/corridas/:id/status ─────────────────────────────────
 router.patch("/corridas/:id/status", async (req, res) => {
-  try {
-    const { status, motorista_id, motorista_nome } = req.body;
-    const allowed = ["aguardando", "aceita", "a_caminho", "em_andamento", "concluida", "cancelada"];
-    if (!allowed.includes(status)) return res.status(400).json({ error: "status_invalido" });
-    const extras: string[] = [];
-    if (status === "concluida") extras.push("concluido_em = NOW()");
-    if (status === "cancelada") extras.push("cancelado_em = NOW()");
-    if (motorista_id) extras.push(`motorista_id = ${motorista_id}`);
-    if (motorista_nome) extras.push(`motorista_nome = '${esc(String(motorista_nome))}'`);
-    const setClause = [`status = '${status}'`, ...extras].join(", ");
-    const rows = await db.execute(`
-      UPDATE corridas SET ${setClause} WHERE id = ${req.params.id} RETURNING *
-    `);
-    if (!rows.rows[0]) return res.status(404).json({ error: "not_found" });
-    const corrida = rows.rows[0] as any;
-    // Mirror cancellation to corridas_solicitadas so driver app detects it
-    if (status === "cancelada") {
-      await db.execute(`
-        UPDATE corridas_solicitadas SET status = 'cancelada'
-        WHERE corrida_id = ${req.params.id} AND status IN ('aceita', 'em_andamento')
-      `).catch(() => {});
-    }
-    broadcast(corrida.empresa_id, { tipo: "status_atualizado", corrida });
-    return res.json(corrida);
-  } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
+  return res.status(403).json({
+    error: "status_update_forbidden",
+    message: "Use o fluxo autenticado de cancelamento ou os endpoints do motorista.",
+  });
 });
 
 // ── POST /api/motorista/corridas/:id/avaliar ─────────────────────────────────

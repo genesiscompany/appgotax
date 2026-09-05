@@ -43,6 +43,8 @@ export interface ProUser {
   pix_chave?: string;
   pix_imagem_url?: string;
   codigo_referral?: string | null;
+  aceita_pagamento_direto?: boolean;
+  aceita_pagamento_app?: boolean;
 }
 
 interface ProAuthContextType {

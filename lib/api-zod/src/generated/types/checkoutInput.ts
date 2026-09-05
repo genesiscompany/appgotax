@@ -11,6 +11,14 @@ import type { CheckoutInputPaymentSource } from "./checkoutInputPaymentSource";
 export interface CheckoutInput {
   module: string;
   referenceId: string;
+  /** carteira is accepted as a legacy input alias and normalized to wallet */
   paymentSource: CheckoutInputPaymentSource;
   mercadoPagoMethod: CheckoutInputMercadoPagoMethod;
+  payerEmail?: string;
+  /**
+   * One-use token created client-side by the Mercado Pago SDK from the authenticated customer's saved card and CVV. Required when mercadoPagoMethod is card; never stored after payment creation.
+   * @minLength 8
+   * @maxLength 512
+   */
+  paymentToken?: string;
 }

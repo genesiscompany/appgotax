@@ -6,12 +6,14 @@ import { empresasTable } from "./empresas";
 export const corridasTable = pgTable("corridas", {
   id: serial("id").primaryKey(),
   empresaId: integer("empresa_id").references(() => empresasTable.id).notNull(),
+  customerId: integer("customer_id"),
   passageiroNome: text("passageiro_nome").notNull(),
   passageiroTelefone: text("passageiro_telefone"),
   origemEndereco: text("origem_endereco").notNull(),
   destinoEndereco: text("destino_endereco").notNull(),
   tipoVeiculo: text("tipo_veiculo").default("economico"),
   formaPagamento: text("forma_pagamento").default("dinheiro"),
+  paymentSource: text("payment_source").notNull().default("direto"),
   status: text("status").notNull().default("aguardando"),
   valor: real("valor").notNull(),
   distanciaKm: real("distancia_km"),
@@ -82,6 +84,8 @@ export const motoristasAppTable = pgTable("motoristas_app", {
   lat: doublePrecision("lat"),
   lng: doublePrecision("lng"),
   ultimoPing: timestamp("ultimo_ping"),
+  aceitaPagamentoDireto: boolean("aceita_pagamento_direto").notNull().default(true),
+  aceitaPagamentoApp: boolean("aceita_pagamento_app").notNull().default(true),
 });
 
 export type MotoristaApp = typeof motoristasAppTable.$inferSelect;

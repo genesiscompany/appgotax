@@ -35,18 +35,45 @@ export const paymentTransactionsTable = pgTable("payment_transactions", {
   customerId: integer("customer_id"),
   module: text("module").notNull(),
   referenceId: text("reference_id").notNull(),
-  paymentSource: text("payment_source").notNull(), // mercado_pago | wallet
+  paymentSource: text("payment_source").notNull(), // mercado_pago | wallet | direto
   method: text("method"),
   status: text("status").notNull().default("pending"),
   grossAmountCents: integer("gross_amount_cents").notNull(),
   platformFeeCents: integer("platform_fee_cents").notNull().default(0),
   providerPreferenceId: text("provider_preference_id"),
   providerPaymentId: text("provider_payment_id"),
+  providerOrderId: text("provider_order_id"),
   initPoint: text("init_point"),
   sandboxInitPoint: text("sandbox_init_point"),
   externalReference: text("external_reference").notNull().unique(),
   idempotencyKey: text("idempotency_key").notNull().unique(),
+  /** AES-GCM protected one-use SDK token; cleared immediately after payment creation. */
+  encryptedPaymentToken: text("encrypted_payment_token"),
   metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("payment_transactions_module_reference_idx").on(table.module, table.referenceId),
+]);
+
+/**
+ * Provider vault references only. Card PAN and CVV are never persisted. The
+ * separate payment transaction may hold an AES-GCM-protected one-use token
+ * only until finalization.
+ */
+export const customerMercadoPagoCardsTable = pgTable("customer_mercado_pago_cards", {
+  id: serial("id").primaryKey(),
+  customerId: integer("customer_id").notNull().unique(),
+  mercadoPagoCustomerId: text("mercado_pago_customer_id").notNull(),
+  mercadoPagoCardId: text("mercado_pago_card_id").notNull(),
+  /** Retained nullable for compatibility; Automatic Payments Profiles are not used. */
+  mercadoPagoPaymentProfileId: text("mercado_pago_payment_profile_id"),
+  lastFour: text("last_four").notNull(),
+  paymentMethod: text("payment_method").notNull(),
+  paymentType: text("payment_type").notNull().default("credit_card"),
+  brand: text("brand").notNull(),
+  expirationMonth: integer("expiration_month").notNull(),
+  expirationYear: integer("expiration_year").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -81,5 +108,8 @@ export const mercadoPagoWebhookEventsTable = pgTable("mercado_pago_webhook_event
 
 export const insertPaymentFeeSchema = createInsertSchema(paymentFeesTable).omit({ id: true, updatedAt: true });
 export type InsertPaymentFee = z.infer<typeof insertPaymentFeeSchema>;
+export const insertCustomerMercadoPagoCardSchema = createInsertSchema(customerMercadoPagoCardsTable).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertCustomerMercadoPagoCard = z.infer<typeof insertCustomerMercadoPagoCardSchema>;
 export type PaymentTransaction = typeof paymentTransactionsTable.$inferSelect;
+export type CustomerMercadoPagoCard = typeof customerMercadoPagoCardsTable.$inferSelect;
 export type CustomerWalletAccount = typeof customerWalletAccountsTable.$inferSelect;

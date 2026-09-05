@@ -5,22 +5,36 @@ import {
 } from "react-native";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import * as Location from "expo-location";
+import * as Clipboard from "expo-clipboard";
 import SegmentoBottomNav, { SEGMENTO_NAV_HEIGHT } from "@/components/SegmentoBottomNav";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
 import Colors from "@/constants/colors";
-import PaymentSelector from "@/components/PaymentSelector";
-import { getWallet, checkoutPayment } from "@/api/payments";
 import { useCustomerAuth } from "@/context/CustomerAuthContext";
 import { useAuthGate } from "@/components/AuthGate";
-import * as Linking from "expo-linking";
+import { checkoutPayment, getPaymentOptions, getSavedCard, getServicePaymentStatus, type PaymentOptions, type SavedCard } from "@/api/payments";
+import MercadoPagoCardTokenizer from "@/components/MercadoPagoCardTokenizer";
+import { getSavedCardConfig, type SavedCardConfig } from "@/api/payments";
 
 const MOD_COLOR = Colors.modules.entrega;
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
   ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`
   : "http://localhost:8080/api";
+
+type PaymentChoice = "dinheiro" | "pix_direto" | "maquininha" | "pix_app" | "card_app" | "wallet";
+
+function paymentPayload(choice: PaymentChoice) {
+  if (choice === "pix_app") return { forma_pagamento: "pix", payment_source: "mercado_pago" as const, checkoutMethod: "pix" as const };
+  if (choice === "card_app") return { forma_pagamento: "cartao", payment_source: "mercado_pago" as const, checkoutMethod: "cartao" as const };
+  if (choice === "wallet") return { forma_pagamento: "credito", payment_source: "wallet" as const, checkoutMethod: "wallet" as const };
+  return {
+    forma_pagamento: choice === "pix_direto" ? "pix" : choice,
+    payment_source: "direto" as const,
+    checkoutMethod: null,
+  };
+}
 
 const STATUS_MAP: Record<string, { label: string; color: string; icon: string }> = {
   pendente:       { label: "Aguardando coleta",  color: "#F59E0B", icon: "clock" },
@@ -53,7 +67,7 @@ type Encomenda = {
 
 type Coords = { latitude: number; longitude: number };
 type Suggestion = { placeId: string; description: string; mainText: string; secondaryText: string; lat: number | null; lng: number | null };
-type ViewMode = "inicio" | "rastrear" | "solicitar";
+type ViewMode = "inicio" | "rastrear" | "solicitar" | "ativa";
 
 function haversineKm(a: Coords, b: Coords): number {
   const R = 6371;
@@ -87,15 +101,40 @@ export default function ClienteEntrega() {
   const [encomenda, setEncomenda] = useState<Encomenda | null>(null);
   const [erro, setErro] = useState("");
 
-  const [paymentSource, setPaymentSource] = useState<"direto" | "mercado_pago" | null>(null);
-  const [formaPagamento, setFormaPagamento] = useState("pix");
-  const [walletBalance, setWalletBalance] = useState(0);
+  const paymentEmpresaId = Number(empresaId || 1);
+  const [formaPagamento, setFormaPagamento] = useState<PaymentChoice>("pix_direto");
+  const [paymentOptions, setPaymentOptions] = useState<PaymentOptions>({
+    receber_direto: true, mercado_pago: false, carteira: false, beta: false, sandbox: false,
+  });
+  const [savedCard, setSavedCard] = useState<SavedCard | null>(null);
+  const [savedCardConfig, setSavedCardConfig] = useState<SavedCardConfig | null>(null);
+  const [savedCardTokenizerVisible, setSavedCardTokenizerVisible] = useState(false);
 
   useEffect(() => {
-    if (customer?.token) {
-      getWallet(customer.token).then(d => setWalletBalance(d.balanceCents)).catch(() => {});
+    if (customer?.formaPagamento) {
+      setFormaPagamento(customer.formaPagamento === "pix" ? "pix_direto" : customer.formaPagamento === "cartao" ? "card_app" : customer.formaPagamento);
     }
+  }, [customer?.formaPagamento]);
+
+  useEffect(() => {
+    if (!customer?.token) { setSavedCard(null); return; }
+    getSavedCard(customer.token).then(setSavedCard).catch(() => setSavedCard(null));
   }, [customer?.token]);
+
+  useEffect(() => {
+    getPaymentOptions(paymentEmpresaId, customer?.token)
+      .then(options => {
+        setPaymentOptions(options);
+        setFormaPagamento(current => {
+          const isDirect = current === "dinheiro" || current === "pix_direto" || current === "maquininha";
+          if ((isDirect && options.receber_direto) || ((current === "pix_app" || current === "card_app") && options.mercado_pago) || (current === "wallet" && options.carteira)) return current;
+          if (options.mercado_pago) return "pix_app";
+          if (options.carteira) return "wallet";
+          return "dinheiro";
+        });
+      })
+      .catch(() => setPaymentOptions(prev => ({ ...prev, mercado_pago: false, carteira: false })));
+  }, [customer?.token, paymentEmpresaId]);
 
   // ─── Solicitar form ──────────────────────────────────────────────
   const [form, setForm] = useState({
@@ -105,6 +144,13 @@ export default function ClienteEntrega() {
     descricao_pacote: "",
   });
   const [enviando, setEnviando] = useState(false);
+  const [servicePaymentReferenceId, setServicePaymentReferenceId] = useState<number | null>(null);
+  const [servicePaymentValue, setServicePaymentValue] = useState(0);
+  const [servicePaymentStatus, setServicePaymentStatus] = useState("pendente");
+  const [servicePaymentMethod, setServicePaymentMethod] = useState<"pix" | "cartao" | null>(null);
+  const [pixCopiaECola, setPixCopiaECola] = useState("");
+  const cardRetryReferenceRef = useRef<number | null>(null);
+  const cardRetryPromptedRef = useRef<Set<number>>(new Set());
 
   const [coletaCoords, setColetaCoords] = useState<Coords | null>(null);
   const [entregaCoords, setEntregaCoords] = useState<Coords | null>(null);
@@ -115,6 +161,57 @@ export default function ClienteEntrega() {
 
   const [taxas, setTaxas] = useState(DEFAULT_TAXAS);
   const [categoria, setCategoria] = useState<string>("padrao");
+
+  useEffect(() => {
+    if (!servicePaymentReferenceId || !customer?.token) return;
+    let active = true;
+    const pollPayment = async () => {
+      try {
+        const payment = await getServicePaymentStatus(customer.token, "entrega", servicePaymentReferenceId);
+        if (!active) return;
+        setServicePaymentStatus(payment.paymentStatus);
+        if (payment.pix?.copyPaste) setPixCopiaECola(payment.pix.copyPaste);
+        if (payment.paymentStatus === "pago") {
+          cardRetryReferenceRef.current = null;
+          cardRetryPromptedRef.current.delete(servicePaymentReferenceId);
+          clearInterval(timer);
+        } else if (
+          payment.paymentStatus === "rejeitado"
+          && servicePaymentMethod === "cartao"
+          && !cardRetryPromptedRef.current.has(servicePaymentReferenceId)
+        ) {
+          cardRetryPromptedRef.current.add(servicePaymentReferenceId);
+          Alert.alert(
+            "Pagamento recusado",
+            "Confirme novamente o CVV do cartão salvo para tentar o pagamento desta mesma entrega.",
+            [
+              { text: "Agora não", style: "cancel" },
+              {
+                text: "Tentar novamente",
+                onPress: async () => {
+                  try {
+                    const config = await getSavedCardConfig(customer.token);
+                    if (!active) return;
+                    setSavedCardConfig(config);
+                    cardRetryReferenceRef.current = servicePaymentReferenceId;
+                    setSavedCardTokenizerVisible(true);
+                  } catch (error) {
+                    Alert.alert("Cartão indisponível", error instanceof Error ? error.message : "Não foi possível abrir a confirmação segura.");
+                  }
+                },
+              },
+            ],
+          );
+        }
+      } catch {}
+    };
+    const timer = setInterval(pollPayment, 4000);
+    pollPayment();
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [servicePaymentReferenceId, servicePaymentMethod, customer?.token]);
 
   const [sugestoesEntrega, setSugestoesEntrega] = useState<Suggestion[]>([]);
   const [showSugestoes, setShowSugestoes] = useState(false);
@@ -318,7 +415,7 @@ export default function ClienteEntrega() {
     } finally { setLoading(false); }
   }
 
-  async function solicitar() {
+  async function solicitar(paymentToken?: string) {
     if (!form.remetente_nome.trim() || !form.endereco_coleta.trim() || !form.endereco_entrega.trim()) {
       Alert.alert("Campos obrigatórios", "Nome, endereço de coleta e entrega são necessários.");
       return;
@@ -331,16 +428,39 @@ export default function ClienteEntrega() {
       Alert.alert("Pagamento", "Selecione uma forma de pagamento.");
       return;
     }
+    if (formaPagamento === "card_app" && !paymentToken) {
+      if (!customer?.token || !savedCard) {
+        Alert.alert("Cartão necessário", "Cadastre um cartão em Perfil > Pagamento antes de continuar.");
+        return;
+      }
+      try {
+        setSavedCardConfig(await getSavedCardConfig(customer.token));
+        setSavedCardTokenizerVisible(true);
+      } catch (error) {
+        Alert.alert("Cartão indisponível", error instanceof Error ? error.message : "Não foi possível abrir a confirmação segura.");
+      }
+      return;
+    }
+    setServicePaymentReferenceId(null);
+    setServicePaymentMethod(null);
+    cardRetryReferenceRef.current = null;
+    cardRetryPromptedRef.current.clear();
     setEnviando(true);
     try {
+      if (!customer?.token) throw new Error("Entre na sua conta para solicitar a entrega.");
+      const selectedPayment = paymentPayload(formaPagamento);
       const r = await fetch(`${API_BASE}/public/entrega/solicitar`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${customer.token}`,
+        },
         body: JSON.stringify({
           ...form,
-          empresa_id: empresaId ? Number(empresaId) : undefined,
+          empresa_id: paymentEmpresaId,
           valor: valorEstimado,
-          forma_pagamento: formaPagamento,
+          forma_pagamento: selectedPayment.forma_pagamento,
+          payment_source: selectedPayment.payment_source,
           categoria,
           distancia_km: distanciaKm,
           coleta_lat: coletaCoords?.latitude,
@@ -349,25 +469,61 @@ export default function ClienteEntrega() {
           entrega_lng: entregaCoords?.longitude,
         }),
       });
-      if (!r.ok) throw new Error();
-      const createdData = await r.json().catch(() => ({}));
-      
-      if (paymentSource === "mercado_pago" && createdData?.id) {
+      if (!r.ok) {
+        const error = await r.json().catch(() => ({}));
+        throw new Error(error.message || error.error || "Não foi possível criar a entrega.");
+      }
+      const created = await r.json();
+      if (!created?.id) throw new Error("A entrega foi criada sem um identificador válido.");
+
+      let cardCheckoutRejected = false;
+      if (selectedPayment.checkoutMethod) {
         try {
-          const checkout = await checkoutPayment(customer?.token || "", {
+          const checkout = await checkoutPayment(customer.token, {
             module: "entrega",
-            referenceId: createdData.id,
-            paymentSource: "mercado_pago",
-            mercadoPagoMethod: formaPagamento as any
+            referenceId: created.id,
+            paymentSource: selectedPayment.payment_source,
+            mercadoPagoMethod: selectedPayment.checkoutMethod,
+            ...(selectedPayment.checkoutMethod === "cartao" && paymentToken ? { paymentToken } : {}),
           });
-          if (checkout.sandboxInitPoint) {
-            Linking.openURL(checkout.sandboxInitPoint);
-          } else if (checkout.initPoint) {
-            Linking.openURL(checkout.initPoint);
+          if (checkout.status === "rejected") {
+            if (selectedPayment.checkoutMethod === "cartao") {
+              cardCheckoutRejected = true;
+            } else {
+              throw new Error(checkout.message || "Pagamento não autorizado");
+            }
           }
-        } catch (e: any) {
-          Alert.alert("Aviso", "Solicitação criada, mas houve falha ao iniciar o Mercado Pago.");
+        } catch (checkoutError) {
+          const stagingMessage = checkoutError instanceof Error ? checkoutError.message : "Falha ao preparar pagamento";
+          try {
+            const cancelResponse = await fetch(`${API_BASE}/payments/services/entrega/${created.id}/cancel`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${customer.token}`,
+              },
+            });
+            if (!cancelResponse.ok) {
+              throw new Error("cancel_failed");
+            }
+          } catch {
+            throw new Error(`${stagingMessage}. O cancelamento automático também falhou; esta entrega não será apresentada como pronta.`);
+          }
+          throw new Error(stagingMessage);
         }
+      }
+
+      if (formaPagamento === "pix_app" || formaPagamento === "card_app") {
+        const referenceId = Number(created.id);
+        setServicePaymentReferenceId(referenceId);
+        setServicePaymentValue(valorEstimado);
+        setServicePaymentMethod(formaPagamento === "card_app" ? "cartao" : "pix");
+        setServicePaymentStatus(cardCheckoutRejected ? "rejeitado" : "pendente");
+        cardRetryReferenceRef.current = null;
+        cardRetryPromptedRef.current.delete(referenceId);
+        setPixCopiaECola("");
+        setView("ativa");
+        return;
       }
 
       Alert.alert(
@@ -381,12 +537,54 @@ export default function ClienteEntrega() {
           setDistanciaKm(0);
         } }],
       );
-    } catch {
-      Alert.alert("Erro", "Não foi possível enviar a solicitação. Tente novamente.");
+    } catch (error) {
+      Alert.alert("Erro", error instanceof Error ? error.message : "Não foi possível enviar a solicitação. Tente novamente.");
     } finally { setEnviando(false); }
   }
 
   const statusInfo = encomenda ? (STATUS_MAP[encomenda.status] ?? { label: encomenda.status, color: "#64748B", icon: "package" }) : null;
+  const pagamentoDisponivel = formaPagamento === "pix_app" || formaPagamento === "card_app"
+    ? paymentOptions.mercado_pago
+    : formaPagamento === "wallet"
+      ? paymentOptions.carteira
+      : paymentOptions.receber_direto;
+  const handleSavedCardToken = async (token: string) => {
+    setSavedCardTokenizerVisible(false);
+    const retryReferenceId = cardRetryReferenceRef.current;
+    cardRetryReferenceRef.current = null;
+    if (retryReferenceId) {
+      if (!customer?.token) return;
+      try {
+        setServicePaymentStatus("pendente");
+        const checkout = await checkoutPayment(customer.token, {
+          module: "entrega",
+          referenceId: retryReferenceId,
+          paymentSource: "mercado_pago",
+          mercadoPagoMethod: "cartao",
+          paymentToken: token,
+        });
+        if (checkout.status === "rejected") {
+          setServicePaymentStatus("rejeitado");
+          Alert.alert("Pagamento recusado", checkout.message || "Não foi possível autorizar o cartão.");
+        } else {
+          setServicePaymentStatus("pendente");
+        }
+      } catch (error) {
+        setServicePaymentStatus("rejeitado");
+        Alert.alert("Não foi possível tentar novamente", error instanceof Error ? error.message : "Confira o CVV e tente mais tarde.");
+      }
+      return;
+    }
+    await solicitar(token);
+  };
+  const clearServicePayment = () => {
+    setServicePaymentReferenceId(null);
+    setServicePaymentMethod(null);
+    setServicePaymentStatus("pendente");
+    setPixCopiaECola("");
+    cardRetryReferenceRef.current = null;
+    cardRetryPromptedRef.current.clear();
+  };
 
   const initialRegion = coletaCoords
     ? { latitude: coletaCoords.latitude, longitude: coletaCoords.longitude, latitudeDelta: 0.04, longitudeDelta: 0.04 }
@@ -395,7 +593,20 @@ export default function ClienteEntrega() {
   return (
     <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <Pressable onPress={() => { if (view !== "inicio" || encomenda) { setView("inicio"); setEncomenda(null); setCodigo(""); setErro(""); } else router.back(); }} style={styles.backBtn}>
+        <Pressable
+          onPress={() => {
+            if (view !== "inicio" || encomenda) {
+              setView("inicio");
+              setEncomenda(null);
+              setCodigo("");
+              setErro("");
+              clearServicePayment();
+            } else {
+              router.back();
+            }
+          }}
+          style={styles.backBtn}
+        >
           <Feather name="arrow-left" size={22} color={colors.text} />
         </Pressable>
         <Text style={[styles.headerTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>Entregas</Text>
@@ -429,6 +640,79 @@ export default function ClienteEntrega() {
             <Feather name="info" size={16} color={MOD_COLOR} />
             <Text style={[styles.infoText, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>O valor é calculado automaticamente pela distância e categoria escolhida.</Text>
           </View>
+        </ScrollView>
+      )}
+
+      {view === "ativa" && servicePaymentReferenceId && (
+        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + SEGMENTO_NAV_HEIGHT + 16 }} showsVerticalScrollIndicator={false}>
+          <View style={[styles.activePaymentHeader, { backgroundColor: servicePaymentStatus === "pago" ? "#10B981" : servicePaymentStatus === "rejeitado" ? "#EF4444" : MOD_COLOR }]}>
+            <Feather name={servicePaymentStatus === "pago" ? "check-circle" : servicePaymentStatus === "rejeitado" ? "alert-circle" : "clock"} size={28} color="#fff" />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.activePaymentEyebrow, { fontFamily: "Inter_500Medium" }]}>Entrega #{servicePaymentReferenceId}</Text>
+              <Text style={[styles.activePaymentTitle, { fontFamily: "Inter_700Bold" }]}>
+                {servicePaymentStatus === "pago" ? "Pago pelo app" : servicePaymentStatus === "rejeitado" ? "Pagamento recusado" : "Pagamento pendente"}
+              </Text>
+            </View>
+            <Text style={[styles.activePaymentValue, { fontFamily: "Inter_700Bold" }]}>
+              R$ {servicePaymentValue.toFixed(2).replace(".", ",")}
+            </Text>
+          </View>
+
+          {servicePaymentMethod === "pix" && servicePaymentStatus !== "pago" && (
+            <View style={[styles.pixPaymentCard, { borderColor: colors.border, backgroundColor: colors.backgroundSecondary }]}>
+              <View style={styles.pixPaymentTitleRow}>
+                <Feather name="smartphone" size={20} color={MOD_COLOR} />
+                <Text style={[styles.pixPaymentCardTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Pague com Pix</Text>
+              </View>
+              {pixCopiaECola ? (
+                <>
+                  <Text style={[styles.pixPaymentHint, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>
+                    Copie o código e pague no aplicativo do seu banco. Continuaremos acompanhando a confirmação automaticamente.
+                  </Text>
+                  <Text style={[styles.pixPaymentCode, { color: colors.text, fontFamily: "Inter_400Regular" }]} numberOfLines={3}>
+                    {pixCopiaECola}
+                  </Text>
+                  <Pressable
+                    style={[styles.pixCopyButton, { backgroundColor: MOD_COLOR }]}
+                    onPress={async () => {
+                      await Clipboard.setStringAsync(pixCopiaECola);
+                      Alert.alert("Código copiado", "Cole o Pix copia e cola no aplicativo do seu banco.");
+                    }}
+                  >
+                    <Feather name="copy" size={16} color="#fff" />
+                    <Text style={[styles.pixCopyButtonText, { fontFamily: "Inter_600SemiBold" }]}>Copiar código Pix</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <View style={styles.pixWaitingRow}>
+                  <ActivityIndicator size="small" color={MOD_COLOR} />
+                  <Text style={[styles.pixPaymentHint, { color: colors.textMuted, fontFamily: "Inter_400Regular", flex: 1 }]}>
+                    O Pix será gerado quando o entregador finalizar o serviço.
+                  </Text>
+                </View>
+              )}
+            </View>
+          )}
+
+          {servicePaymentMethod === "cartao" && servicePaymentStatus !== "pago" && (
+            <View style={[styles.paidInfoCard, { borderColor: servicePaymentStatus === "rejeitado" ? "#EF444440" : colors.border, backgroundColor: colors.backgroundSecondary }]}>
+              <Feather name="credit-card" size={20} color={servicePaymentStatus === "rejeitado" ? "#EF4444" : MOD_COLOR} />
+              <Text style={[styles.paidInfoText, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
+                {servicePaymentStatus === "rejeitado"
+                  ? "A cobrança não foi autorizada. Use a confirmação de CVV para tentar novamente nesta entrega."
+                  : "A confirmação do pagamento com cartão está sendo processada."}
+              </Text>
+            </View>
+          )}
+
+          {servicePaymentStatus === "pago" && (
+            <View style={[styles.paidInfoCard, { borderColor: "#10B98140", backgroundColor: isDark ? "#0d2018" : "#F0FDF4" }]}>
+              <Feather name="shield" size={20} color="#10B981" />
+              <Text style={[styles.paidInfoText, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
+                Pagamento confirmado. Você não precisa pagar ao entregador.
+              </Text>
+            </View>
+          )}
         </ScrollView>
       )}
 
@@ -756,29 +1040,33 @@ export default function ClienteEntrega() {
 
             <View style={{ marginTop: 8 }}>
               <Text style={[styles.fieldLabel, { color: colors.text, fontFamily: "Inter_500Medium" }]}>Pagamento</Text>
-              <PaymentSelector
-                empresaId={empresaId || null}
-                token={customer?.token}
-                colors={colors}
-                accentColor={MOD_COLOR}
-                directMethods={[
-                  { id: "pix", label: "Pix", icon: "zap", color: "#10B981" },
-                  { id: "dinheiro", label: "Dinheiro", icon: "dollar-sign", color: "#F59E0B" },
-                  { id: "credito", label: "Cartão de Crédito", icon: "credit-card", color: "#3B82F6" },
-                  { id: "debito", label: "Cartão de Débito", icon: "credit-card", color: "#8B5CF6" },
-                ]}
-                selectedSource={paymentSource}
-                onSourceSelect={(src) => setPaymentSource(src)}
-                selectedMethod={formaPagamento}
-                onMethodSelect={(m) => setFormaPagamento(m)}
-                walletBalanceCents={walletBalance}
-              />
+              <View style={styles.paymentChoices}>
+                {([
+                  ...(paymentOptions.receber_direto ? [
+                    { id: "dinheiro", label: "Dinheiro" },
+                    { id: "pix_direto", label: "Pix direto" },
+                    { id: "maquininha", label: "Maquininha" },
+                  ] : []),
+                  ...(paymentOptions.mercado_pago ? [{ id: "pix_app", label: "Pix pelo app" }] : []),
+                  ...(paymentOptions.mercado_pago && savedCard ? [{ id: "card_app", label: `Cartão •••• ${savedCard.lastFour}` }] : []),
+                  ...(paymentOptions.carteira ? [{ id: "wallet", label: "Carteira" }] : []),
+                ] as { id: PaymentChoice; label: string }[]).map(option => (
+                  <Pressable
+                    key={option.id}
+                    onPress={() => setFormaPagamento(option.id)}
+                    style={[styles.paymentChoice, { borderColor: formaPagamento === option.id ? MOD_COLOR : colors.border, backgroundColor: formaPagamento === option.id ? MOD_COLOR + "18" : colors.backgroundSecondary }]}
+                  >
+                    <Feather name={option.id === "wallet" || option.id === "card_app" ? "credit-card" : option.id.includes("pix") ? "smartphone" : "dollar-sign"} size={15} color={formaPagamento === option.id ? MOD_COLOR : colors.textMuted} />
+                    <Text style={[styles.paymentChoiceText, { color: formaPagamento === option.id ? MOD_COLOR : colors.text, fontFamily: "Inter_500Medium" }]}>{option.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
             </View>
 
             <Pressable
-              style={[styles.submitBtn, { backgroundColor: MOD_COLOR, opacity: enviando || valorEstimado <= 0 ? 0.6 : 1 }]}
+              style={[styles.submitBtn, { backgroundColor: MOD_COLOR, opacity: enviando || valorEstimado <= 0 || !pagamentoDisponivel ? 0.6 : 1 }]}
               onPress={() => requireAuth(() => solicitar())}
-              disabled={enviando || valorEstimado <= 0}
+              disabled={enviando || valorEstimado <= 0 || !pagamentoDisponivel}
             >
               {enviando
                 ? <ActivityIndicator color="#fff" size="small" />
@@ -792,10 +1080,28 @@ export default function ClienteEntrega() {
       <SegmentoBottomNav
         ativo="inicio"
         corAtivo={MOD_COLOR}
-        onInicio={() => { setView("inicio"); setEncomenda(null); setCodigo(""); setErro(""); }}
+        onInicio={() => {
+          setView("inicio");
+          setEncomenda(null);
+          setCodigo("");
+          setErro("");
+          clearServicePayment();
+        }}
         onCarrinho={() => setView("rastrear")}
         onFinalizar={() => setView("solicitar")}
         empresaId={empresaId ? Number(empresaId) : null}
+      />
+      <MercadoPagoCardTokenizer
+        visible={savedCardTokenizerVisible}
+        publicKey={savedCardConfig?.publicKey ?? ""}
+        sandbox={savedCardConfig?.sandbox ?? false}
+        mode="saved"
+        cardId={savedCard?.cardId}
+        onClose={() => {
+          cardRetryReferenceRef.current = null;
+          setSavedCardTokenizerVisible(false);
+        }}
+        onToken={handleSavedCardToken}
       />
     </View>
   );
@@ -808,6 +1114,20 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 18, flex: 1, textAlign: "center" },
   welcomeTitle: { fontSize: 22, marginBottom: 6 },
   welcomeSub: { fontSize: 14, marginBottom: 24, lineHeight: 20 },
+  activePaymentHeader: { borderRadius: 16, padding: 16, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 14 },
+  activePaymentEyebrow: { color: "rgba(255,255,255,0.8)", fontSize: 12 },
+  activePaymentTitle: { color: "#fff", fontSize: 18, marginTop: 2 },
+  activePaymentValue: { color: "#fff", fontSize: 15 },
+  pixPaymentCard: { borderWidth: 1, borderRadius: 16, padding: 16, gap: 12 },
+  pixPaymentTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  pixPaymentCardTitle: { fontSize: 16 },
+  pixPaymentHint: { fontSize: 13, lineHeight: 19 },
+  pixPaymentCode: { fontSize: 11, lineHeight: 16 },
+  pixCopyButton: { minHeight: 46, borderRadius: 12, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  pixCopyButtonText: { color: "#fff", fontSize: 14 },
+  pixWaitingRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  paidInfoCard: { borderWidth: 1, borderRadius: 14, padding: 16, flexDirection: "row", alignItems: "center", gap: 10 },
+  paidInfoText: { flex: 1, fontSize: 14, lineHeight: 20 },
   actionCard: { flexDirection: "row", alignItems: "center", gap: 14, borderRadius: 16, borderWidth: 1, padding: 16, marginBottom: 14 },
   actionIcon: { width: 54, height: 54, borderRadius: 16, alignItems: "center", justifyContent: "center" },
   actionTitle: { fontSize: 16, marginBottom: 4 },
@@ -818,6 +1138,13 @@ const styles = StyleSheet.create({
   searchRow: { flexDirection: "row" },
   inputGroup: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, height: 50, gap: 10 },
   input: { flex: 1, fontSize: 15 },
+  paymentSummary: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13 },
+  paymentSummaryInfo: { flexDirection: "row", alignItems: "center", gap: 9 },
+  paymentSummaryText: { fontSize: 14 },
+  paymentChangeText: { fontSize: 14 },
+  paymentChoices: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  paymentChoice: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderRadius: 12, paddingHorizontal: 11, paddingVertical: 9 },
+  paymentChoiceText: { fontSize: 13 },
   buscaBtn: { width: 50, height: 50, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   erroCard: { flexDirection: "row", gap: 8, alignItems: "center", borderRadius: 10, borderWidth: 1, padding: 12, marginTop: 14 },
   erroText: { flex: 1, fontSize: 13, color: "#EF4444" },

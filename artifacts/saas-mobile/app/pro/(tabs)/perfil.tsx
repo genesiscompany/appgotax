@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, Alert, ActivityIndicator, StatusBar, Modal, Image, Platform, Share, KeyboardAvoidingView,
+  TextInput, Alert, ActivityIndicator, StatusBar, Modal, Image, Platform, Share, KeyboardAvoidingView, Switch,
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -382,7 +382,7 @@ function buildPixImgUrl(pixImagem: string, apiBase: string) {
 }
 
 export default function ProPerfil() {
-  const { proUser, logout, refreshPerfil } = useProAuth();
+  const { proUser, logout, refreshPerfil, updateLocal } = useProAuth();
   const [editando, setEditando] = useState(false);
   const [salvando, setSalvando] = useState(false);
   const [veiculoModal, setVeiculoModal] = useState(false);
@@ -481,6 +481,23 @@ export default function ProPerfil() {
         Alert.alert("Erro", "Não foi possível salvar.");
       }
     } catch { Alert.alert("Erro", "Sem conexão."); }
+  };
+
+  const salvarRecebimento = async (campo: "aceita_pagamento_direto" | "aceita_pagamento_app", valor: boolean) => {
+    try {
+      const res = await fetch(`${API_BASE}/motorista-app/perfil`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${proUser.token}` },
+        body: JSON.stringify({ [campo]: valor }),
+      });
+      if (!res.ok) {
+        Alert.alert("Erro", "Não foi possível salvar.");
+        return;
+      }
+      updateLocal({ [campo]: valor });
+    } catch {
+      Alert.alert("Erro", "Sem conexão.");
+    }
   };
 
   const salvarPix = async () => {
@@ -650,6 +667,35 @@ export default function ProPerfil() {
               ))}
             </>
           )}
+        </View>
+
+        {/* Recebimentos */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>RECEBIMENTOS</Text>
+          <View style={styles.infoRow}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={styles.infoLabel}>Pagamento direto</Text>
+              <Text style={styles.recebimentoHint}>Receba do cliente ao concluir o serviço.</Text>
+            </View>
+            <Switch
+              value={proUser.aceita_pagamento_direto ?? true}
+              onValueChange={v => salvarRecebimento("aceita_pagamento_direto", v)}
+              trackColor={{ false: "#333", true: cor + "99" }}
+              thumbColor={proUser.aceita_pagamento_direto ?? true ? cor : "#888"}
+            />
+          </View>
+          <View style={styles.infoRow}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={styles.infoLabel}>Pagamento pelo app</Text>
+              <Text style={styles.recebimentoHint}>Aceite serviços pagos antecipadamente no app.</Text>
+            </View>
+            <Switch
+              value={proUser.aceita_pagamento_app ?? true}
+              onValueChange={v => salvarRecebimento("aceita_pagamento_app", v)}
+              trackColor={{ false: "#333", true: cor + "99" }}
+              thumbColor={proUser.aceita_pagamento_app ?? true ? cor : "#888"}
+            />
+          </View>
         </View>
 
         {/* PIX */}
@@ -943,6 +989,7 @@ const styles = StyleSheet.create({
   infoRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: "#222" },
   infoLabel: { fontSize: 13, color: "#8896B0" },
   infoVal: { fontSize: 14, color: "#FFF", fontWeight: "600", maxWidth: "55%", textAlign: "right" },
+  recebimentoHint: { fontSize: 11, color: "#666", marginTop: 3, lineHeight: 15 },
   docStatus: { fontSize: 13, fontWeight: "700" },
   fieldLabel: { fontSize: 12, color: "#8896B0", marginTop: 10, marginBottom: 4 },
   input: { backgroundColor: "#111", borderWidth: 1.5, borderColor: "#2A2A2A", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, color: "#FFF", fontSize: 15 },

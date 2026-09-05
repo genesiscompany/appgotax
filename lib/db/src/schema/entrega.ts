@@ -6,6 +6,7 @@ import { empresasTable } from "./empresas";
 export const entregasTable = pgTable("entregas", {
   id: serial("id").primaryKey(),
   empresaId: integer("empresa_id").references(() => empresasTable.id).notNull(),
+  customerId: integer("customer_id"),
   remetenteNome: text("remetente_nome").notNull(),
   remetenteTelefone: text("remetente_telefone"),
   destinatarioNome: text("destinatario_nome").notNull(),
@@ -14,6 +15,8 @@ export const entregasTable = pgTable("entregas", {
   enderecoEntrega: text("endereco_entrega").notNull(),
   descricaoPacote: text("descricao_pacote"),
   status: text("status").notNull().default("aguardando"),
+  paymentSource: text("payment_source").notNull().default("direto"),
+  formaPagamento: text("forma_pagamento"),
   entregadorNome: text("entregador_nome"),
   valor: real("valor").notNull(),
   criadoEm: timestamp("criado_em").notNull().defaultNow(),

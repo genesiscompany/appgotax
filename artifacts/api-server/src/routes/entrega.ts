@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { db } from "@workspace/db";
 import { entregasTable } from "@workspace/db/schema";
 import { eq, sql } from "drizzle-orm";
+import { customerIdFromRequest } from "../lib/customerToken";
 
 const router: IRouter = Router();
 
@@ -78,9 +79,18 @@ router.get("/entregas", async (req, res) => {
 router.post("/entregas", async (req, res) => {
   try {
     const empresaId = Number(req.headers["x-empresa-id"] || 1);
-    const { remetenteNome, remetenteTelefone, destinatarioNome, destinatarioTelefone, enderecoColeta, enderecoEntrega, descricaoPacote, valor } = req.body;
+    const { remetenteNome, remetenteTelefone, destinatarioNome, destinatarioTelefone, enderecoColeta, enderecoEntrega, descricaoPacote, valor, payment_source } = req.body;
+    const rawPaymentSource = payment_source === undefined ? "direto" : String(payment_source);
+    const paymentSource = rawPaymentSource === "carteira" ? "wallet" : rawPaymentSource;
+    if (!["direto", "mercado_pago", "wallet"].includes(paymentSource)) {
+      return res.status(400).json({ error: "payment_source_invalido", message: "payment_source deve ser direto, mercado_pago ou wallet" });
+    }
+    await db.execute(sql`ALTER TABLE entregas ADD COLUMN IF NOT EXISTS customer_id INTEGER`);
+    const owner = customerIdFromRequest(req);
+    if (paymentSource !== "direto" && !owner) return res.status(401).json({ error: "signed_customer_token_required" });
     const [entrega] = await db.insert(entregasTable).values({
       empresaId,
+      customerId: owner,
       remetenteNome,
       remetenteTelefone,
       destinatarioNome,
@@ -90,8 +100,9 @@ router.post("/entregas", async (req, res) => {
       descricaoPacote,
       valor: Number(valor),
       status: "aguardando",
+      paymentSource,
     }).returning();
-    return res.status(201).json({ ...entrega, criadoEm: entrega.criadoEm.toISOString() });
+    return res.status(201).json({ ...entrega, criadoEm: entrega.criadoEm.toISOString(), paymentSource: entrega.paymentSource, paymentStatus: entrega.paymentSource === "direto" ? "direto" : "pendente" });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "server_error", message: "Erro interno" });
@@ -99,16 +110,7 @@ router.post("/entregas", async (req, res) => {
 });
 
 router.patch("/entregas/:id/status", async (req, res) => {
-  try {
-    const { status } = req.body;
-    const [entrega] = await db.update(entregasTable)
-      .set({ status })
-      .where(eq(entregasTable.id, Number(req.params.id)))
-      .returning();
-    return res.json({ ...entrega, criadoEm: entrega.criadoEm.toISOString() });
-  } catch (err) {
-    return res.status(500).json({ error: "server_error", message: "Erro interno" });
-  }
+  res.status(403).json({ error: "status_transition_restricted", message: "Use o fluxo autenticado de motorista ou cancelamento do cliente" });
 });
 
 export default router;

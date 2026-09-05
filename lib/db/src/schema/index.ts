@@ -8,3 +8,4 @@ export * from "./entrega";
 export * from "./food";
 export * from "./subcategorias-alimentacao";
 export * from "./pedidos";
+export * from "./payments";

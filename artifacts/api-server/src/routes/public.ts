@@ -5,6 +5,7 @@ import { pedidosPdvTable, itensPedidoPdvTable } from "@workspace/db/schema";
 import bcrypt from "bcryptjs";
 import { broadcastToEmpresa, sendExpoPushToEmpresa } from "./pdv";
 import { dispatchEntregaToEntregadores } from "./motorista-app";
+import { customerIdFromRequest } from "../lib/customerToken";
 
 const router: IRouter = Router();
 
@@ -462,7 +463,6 @@ router.get("/parceiros", async (req, res) => {
         e.id,
         e.nome,
         e.cor_primaria as cor,
-        e.logo as logo,
         e.modulos_ativos::text as modulos_ativos_text,
         e.destaque,
         e.ecommerce_categoria as categoria,
@@ -474,7 +474,7 @@ router.get("/parceiros", async (req, res) => {
       FROM empresas e
       LEFT JOIN produtos_pdv p ON p.empresa_id = e.id AND p.ativo = true
       WHERE e.ativo = true
-      GROUP BY e.id, e.nome, e.cor_primaria, e.logo, e.destaque, e.ecommerce_categoria
+      GROUP BY e.id, e.nome, e.cor_primaria, e.destaque, e.ecommerce_categoria
       ORDER BY e.destaque DESC, e.nome
     `);
     return res.json((rows.rows as any[]).map((r: any) => {
@@ -487,7 +487,6 @@ router.get("/parceiros", async (req, res) => {
         id: r.id,
         nome: r.nome,
         cor: r.cor ?? "#22C55E",
-        logo: r.logo ?? null,
         modulos,
         destaque: r.destaque === true,
         categoria: r.categoria ?? r.categoria_pdv ?? "Parceiro",
@@ -709,25 +708,63 @@ router.post("/entrega/solicitar", async (req, res) => {
       destinatario_nome, destinatario_telefone,
       endereco_coleta, endereco_entrega,
       descricao_pacote, valor,
-      categoria, distancia_km,
+       categoria, distancia_km, forma_pagamento,
       coleta_lat, coleta_lng, entrega_lat, entrega_lng,
+       payment_source,
     } = req.body;
     if (!remetente_nome?.trim() || !endereco_coleta?.trim() || !endereco_entrega?.trim()) {
       return res.status(400).json({ error: "Nome do remetente, endereço de coleta e entrega são obrigatórios" });
     }
     const safe = (v: any) => v ? `'${String(v).replace(/'/g, "''")}'` : "NULL";
     const num = (v: any) => (v == null || v === "" || isNaN(Number(v))) ? "NULL" : String(Number(v));
-    const eId = empresa_id ? Number(empresa_id) : "NULL";
+    const eId = Number(empresa_id);
+    if (!Number.isInteger(eId) || eId <= 0) return res.status(400).json({ error: "empresa_id_invalido" });
+    const company = await db.execute(sql`SELECT id FROM empresas WHERE id = ${eId} AND ativo = true LIMIT 1`);
+    if (!company.rows[0]) return res.status(404).json({ error: "empresa_not_found" });
+    const rawSource = payment_source === undefined ? "direto" : String(payment_source);
+    const paymentSource = rawSource === "carteira" ? "wallet" : rawSource;
+    if (!["direto", "mercado_pago", "wallet"].includes(paymentSource)) {
+      return res.status(400).json({ error: "payment_source_invalido", message: "payment_source deve ser direto, mercado_pago ou wallet" });
+    }
+    const customerId = customerIdFromRequest(req);
+    if (paymentSource !== "direto" && !customerId) return res.status(401).json({ error: "signed_customer_token_required" });
+    const allowedMethods = new Set(["pix", "dinheiro", "credito", "debito", "wallet"]);
+    const paymentMethod = paymentSource === "wallet" ? "wallet" : (allowedMethods.has(String(forma_pagamento)) ? String(forma_pagamento) : (paymentSource === "direto" ? "dinheiro" : "pix"));
+    const coords = [coleta_lat, coleta_lng, entrega_lat, entrega_lng].map(Number);
+    const validCoords = [coleta_lat, coleta_lng, entrega_lat, entrega_lng].every(v => v !== null && v !== undefined && v !== "")
+      && coords.every(Number.isFinite)
+      && Math.abs(coords[0]) <= 90 && Math.abs(coords[2]) <= 90
+      && Math.abs(coords[1]) <= 180 && Math.abs(coords[3]) <= 180;
+    if (paymentSource !== "direto" && !validCoords) {
+      return res.status(422).json({ error: "authoritative_quote_unavailable", message: "Coordenadas válidas são obrigatórias para pagamento pelo app" });
+    }
+    let authoritativeKm = paymentSource === "direto" ? (Number(distancia_km) || 0) : 0;
+    if (validCoords) {
+      const [lat1, lng1, lat2, lng2] = coords.map(x => x * Math.PI / 180);
+      const h = Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lng2 - lng1) / 2) ** 2;
+      authoritativeKm = Math.round(6371 * 2 * Math.asin(Math.sqrt(h)) * 10) / 10;
+    }
+    const category = ["padrao", "expressa", "grande"].includes(String(categoria)) ? String(categoria) : "padrao";
+    const defaults: Record<string, [number, number, number]> = { padrao: [10, 3, 2], expressa: [15, 3, 3], grande: [20, 3, 4] };
+    const configRows = await db.execute(sql`SELECT chave, valor FROM configuracoes_sistema WHERE chave IN (${`entrega_${category}_taxa_minima`}, ${`entrega_${category}_distancia_km`}, ${`entrega_${category}_taxa_km`})`);
+    const config = Object.fromEntries((configRows.rows as any[]).map(r => [r.chave, Number(r.valor)]));
+    const [defaultMinimum, defaultIncludedKm, defaultPerKm] = defaults[category];
+    const minimum = Number.isFinite(config[`entrega_${category}_taxa_minima`]) ? config[`entrega_${category}_taxa_minima`] : defaultMinimum;
+    const includedKm = Number.isFinite(config[`entrega_${category}_distancia_km`]) ? config[`entrega_${category}_distancia_km`] : defaultIncludedKm;
+    const perKm = Number.isFinite(config[`entrega_${category}_taxa_km`]) ? config[`entrega_${category}_taxa_km`] : defaultPerKm;
+    const authoritativeValue = Math.round((minimum + Math.max(0, authoritativeKm - includedKm) * perKm) * 100) / 100;
+    await db.execute(sql`ALTER TABLE entregas ADD COLUMN IF NOT EXISTS customer_id INTEGER`);
+    await db.execute(sql`ALTER TABLE entregas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`);
     const row = await db.execute(`
-      INSERT INTO entregas (empresa_id, remetente_nome, remetente_telefone, destinatario_nome, destinatario_telefone,
+      INSERT INTO entregas (empresa_id, customer_id, remetente_nome, remetente_telefone, destinatario_nome, destinatario_telefone,
         endereco_coleta, endereco_entrega, descricao_pacote, status, valor,
-        categoria, distancia_km, coleta_lat, coleta_lng, entrega_lat, entrega_lng)
-      VALUES (${eId}, ${safe(remetente_nome)}, ${safe(remetente_telefone)},
+        categoria, distancia_km, coleta_lat, coleta_lng, entrega_lat, entrega_lng, payment_source, forma_pagamento)
+      VALUES (${eId}, ${customerId ?? "NULL"}, ${safe(remetente_nome)}, ${safe(remetente_telefone)},
               ${safe(destinatario_nome)}, ${safe(destinatario_telefone)},
               ${safe(endereco_coleta)}, ${safe(endereco_entrega)},
-              ${safe(descricao_pacote)}, 'pendente', ${Number(valor) || 0},
-              ${safe(categoria)}, ${num(distancia_km)},
-              ${num(coleta_lat)}, ${num(coleta_lng)}, ${num(entrega_lat)}, ${num(entrega_lng)})
+               ${safe(descricao_pacote)}, 'pendente', ${authoritativeValue},
+               ${safe(category)}, ${num(authoritativeKm)},
+               ${num(coleta_lat)}, ${num(coleta_lng)}, ${num(entrega_lat)}, ${num(entrega_lng)}, '${paymentSource}', '${paymentMethod}')
       RETURNING *
     `);
     const inserted = row.rows[0] as any;
@@ -846,3 +883,4 @@ router.post("/pedido/comprovante", async (req, res) => {
 });
 
 export default router;
+

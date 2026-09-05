@@ -155,12 +155,15 @@ export const ListCorridasResponseItem = zod.object({
     "aguardando",
     "aceita",
     "em_andamento",
+    "finalizando_pagamento",
     "concluida",
     "cancelada",
   ]),
   valor: zod.number(),
   distanciaKm: zod.number().nullish(),
   motoristaNome: zod.string().nullish(),
+  paymentSource: zod.enum(["direto", "mercado_pago", "wallet"]).optional(),
+  paymentStatus: zod.enum(["direto", "pendente", "pago"]).optional(),
   criadoEm: zod.date(),
 });
 export const ListCorridasResponse = zod.array(ListCorridasResponseItem);
@@ -337,12 +340,15 @@ export const ListEntregasResponseItem = zod.object({
     "aguardando",
     "coletado",
     "em_transito",
+    "finalizando_pagamento",
     "entregue",
     "devolvido",
     "cancelado",
   ]),
   entregadorNome: zod.string().nullish(),
   valor: zod.number(),
+  paymentSource: zod.enum(["direto", "mercado_pago", "wallet"]).optional(),
+  paymentStatus: zod.enum(["direto", "pendente", "pago"]).optional(),
   criadoEm: zod.date(),
 });
 export const ListEntregasResponse = zod.array(ListEntregasResponseItem);
@@ -359,6 +365,35 @@ export const CreateEntregaBody = zod.object({
   enderecoEntrega: zod.string(),
   descricaoPacote: zod.string().optional(),
   valor: zod.number(),
+  paymentSource: zod.enum(["direto", "mercado_pago", "wallet"]).optional(),
+});
+
+/**
+ * @summary Solicita entrega com preço recalculado autoritativamente pelo servidor
+ */
+export const RequestPublicDeliveryBody = zod.object({
+  empresa_id: zod.number(),
+  remetente_nome: zod.string(),
+  remetente_telefone: zod.string().optional(),
+  destinatario_nome: zod.string().optional(),
+  destinatario_telefone: zod.string().optional(),
+  endereco_coleta: zod.string(),
+  endereco_entrega: zod.string(),
+  descricao_pacote: zod.string().optional(),
+  categoria: zod.enum(["padrao", "expressa", "grande"]).optional(),
+  distancia_km: zod.number().optional(),
+  coleta_lat: zod.number().optional(),
+  coleta_lng: zod.number().optional(),
+  entrega_lat: zod.number().optional(),
+  entrega_lng: zod.number().optional(),
+  forma_pagamento: zod.string().optional(),
+  payment_source: zod.enum(["direto", "mercado_pago", "wallet", "carteira"]),
+  valor: zod
+    .number()
+    .optional()
+    .describe(
+      "Estimativa do cliente; o servidor recalcula o valor autoritativo",
+    ),
 });
 
 /**
@@ -396,3 +431,162 @@ export const GetCardapioResponseItem = zod.object({
   disponivel: zod.boolean(),
 });
 export const GetCardapioResponse = zod.array(GetCardapioResponseItem);
+
+export const GetPaymentOptionsParams = zod.object({
+  empresaId: zod.coerce.number(),
+});
+
+export const GetPaymentOptionsResponse = zod.object({
+  empresaId: zod.number().optional(),
+  mercadoPago: zod.boolean().optional(),
+  directPayment: zod.boolean().optional(),
+  wallet: zod.boolean().optional(),
+  beta: zod.boolean().optional(),
+  sandbox: zod.boolean().optional(),
+});
+
+export const UpdatePartnerPaymentOptionsBody = zod.object({
+  mercadoPagoEnabled: zod.boolean(),
+  directPaymentEnabled: zod.boolean(),
+});
+
+export const GetAdminPartnerPaymentConfigParams = zod.object({
+  empresaId: zod.coerce.number(),
+});
+
+export const UpdateAdminPartnerPaymentConfigParams = zod.object({
+  empresaId: zod.coerce.number(),
+});
+
+export const UpdateAdminPartnerPaymentConfigBody = zod.object({
+  mercadoPagoEnabled: zod.boolean().optional(),
+  directPaymentEnabled: zod.boolean().optional(),
+});
+
+export const UpdateGlobalMercadoPagoConfigBody = zod.object({
+  publicKey: zod.string(),
+  accessToken: zod.string().optional(),
+  enabled: zod.boolean(),
+});
+
+export const UpdatePaymentFeesBody = zod.object({
+  pix: zod.number().describe("Percentage in basis points"),
+  card: zod.number().describe("Percentage in basis points"),
+  wallet: zod.number().describe("Percentage in basis points"),
+});
+
+/**
+ * @summary Mercado Pago SDK configuration for an authenticated customer
+ */
+export const GetSavedCardConfigResponse = zod.object({
+  publicKey: zod.string(),
+  sandbox: zod.boolean(),
+});
+
+/**
+ * @summary Get the authenticated customer's saved card
+ */
+export const getSavedCardResponseCardOneLastFourRegExp = new RegExp("^\\d{4}$");
+export const getSavedCardResponseCardOneExpirationMonthMax = 12;
+
+export const GetSavedCardResponse = zod.object({
+  card: zod.union([
+    zod.object({
+      cardId: zod.string(),
+      lastFour: zod.string().regex(getSavedCardResponseCardOneLastFourRegExp),
+      paymentMethod: zod.string(),
+      brand: zod.string(),
+      expirationMonth: zod
+        .number()
+        .min(1)
+        .max(getSavedCardResponseCardOneExpirationMonthMax),
+      expirationYear: zod.number(),
+    }),
+    zod.null(),
+  ]),
+});
+
+/**
+ * @summary Save an official Mercado Pago SDK one-use card token
+ */
+export const saveCardBodyCardTokenMin = 8;
+
+export const SaveCardBody = zod.object({
+  cardToken: zod
+    .string()
+    .min(saveCardBodyCardTokenMin)
+    .describe("Opaque one-use token created by the official Mercado Pago SDK."),
+});
+
+/**
+ * @summary Delete the authenticated customer's saved card
+ */
+
+export const DeleteSavedCardParams = zod.object({
+  cardId: zod.coerce.string().min(1),
+});
+
+export const createWalletTopupBodyAmountCentsMin = 100;
+
+export const CreateWalletTopupBody = zod.object({
+  amountCents: zod.number().min(createWalletTopupBodyAmountCentsMin),
+});
+
+export const createPaymentCheckoutBodyPaymentTokenMin = 8;
+export const createPaymentCheckoutBodyPaymentTokenMax = 512;
+
+export const CreatePaymentCheckoutBody = zod.object({
+  module: zod.string(),
+  referenceId: zod.string(),
+  paymentSource: zod
+    .enum(["mercado_pago", "wallet", "carteira"])
+    .describe(
+      "carteira is accepted as a legacy input alias and normalized to wallet",
+    ),
+  mercadoPagoMethod: zod.enum(["pix", "card", "wallet"]),
+  payerEmail: zod.string().email().optional(),
+  paymentToken: zod
+    .string()
+    .min(createPaymentCheckoutBodyPaymentTokenMin)
+    .max(createPaymentCheckoutBodyPaymentTokenMax)
+    .optional()
+    .describe(
+      "One-use token created client-side by the Mercado Pago SDK from the authenticated customer's saved card and CVV. Required when mercadoPagoMethod is card; never stored after payment creation.",
+    ),
+});
+
+/**
+ * @summary Cancela serviço pertencente ao cliente autenticado enquanto ainda cancelável
+ */
+export const CancelCustomerServiceParams = zod.object({
+  module: zod.enum(["motorista", "entrega"]),
+  referenceId: zod.coerce.number(),
+});
+
+/**
+ * @summary Consulta pagamento e Pix sanitizado de serviço pertencente ao cliente
+ */
+export const GetCustomerServicePaymentStatusParams = zod.object({
+  module: zod.enum(["motorista", "entrega"]),
+  referenceId: zod.coerce.number(),
+});
+
+export const GetCustomerServicePaymentStatusResponse = zod.object({
+  module: zod.enum(["motorista", "entrega"]),
+  referenceId: zod.number(),
+  paymentSource: zod.enum(["direto", "mercado_pago", "wallet"]),
+  paymentStatus: zod.enum(["direto", "pendente", "pago", "rejeitado"]),
+  status: zod.string(),
+  method: zod.string().nullable(),
+  pix: zod
+    .object({
+      qrCode: zod.string().nullish(),
+      qrCodeBase64: zod.string().nullish(),
+      ticketUrl: zod.string().nullish(),
+    })
+    .nullable(),
+});
+
+export const GetPaymentTransactionParams = zod.object({
+  id: zod.coerce.number(),
+});

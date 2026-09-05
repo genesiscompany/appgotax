@@ -11,6 +11,11 @@ import * as ImagePicker from "expo-image-picker";
 import Colors from "@/constants/colors";
 import { useCustomerAuth, type FormaPagamento } from "@/context/CustomerAuthContext";
 import ClienteBottomNav from "@/components/ClienteBottomNav";
+import MercadoPagoCardTokenizer from "@/components/MercadoPagoCardTokenizer";
+import {
+  deleteSavedCard, getSavedCard, getSavedCardConfig, saveCard,
+  type SavedCard, type SavedCardConfig,
+} from "@/api/payments";
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
   ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`
@@ -22,6 +27,7 @@ const FORMAS_PAGAMENTO: { id: FormaPagamento; label: string; icon: string; color
   { id: "maquininha", label: "Maquininha", icon: "credit-card", color: "#3B82F6", desc: "Débito ou crédito" },
   { id: "pix",        label: "Pix",         icon: "zap",         color: "#22C55E", desc: "Transferência instantânea" },
   { id: "dinheiro",  label: "Dinheiro",    icon: "dollar-sign", color: "#F59E0B", desc: "Pagamento em espécie" },
+  { id: "cartao",    label: "Cartão salvo", icon: "credit-card", color: "#009EE3", desc: "Cobrança segura pelo app" },
 ];
 
 function formatWhatsapp(num?: string | null) {
@@ -101,6 +107,33 @@ export default function PerfilScreen() {
 
   const [pagamentoModal, setPagamentoModal] = useState(false);
   const [pagamentoLoading, setPagamentoLoading] = useState(false);
+  const [savedCard, setSavedCard] = useState<SavedCard | null>(null);
+  const [savedCardConfig, setSavedCardConfig] = useState<SavedCardConfig | null>(null);
+  const [cardTokenizerVisible, setCardTokenizerVisible] = useState(false);
+  const [cardLoading, setCardLoading] = useState(false);
+
+  const carregarCartao = async () => {
+    if (!customer?.token) return;
+    setCardLoading(true);
+    try {
+      const card = await getSavedCard(customer.token);
+      setSavedCard(card);
+    } catch {
+      setSavedCard(null);
+    }
+    try {
+      const config = await getSavedCardConfig(customer.token);
+      setSavedCardConfig(config);
+    } catch {
+      setSavedCardConfig(null);
+    } finally {
+      setCardLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (customer?.token) void carregarCartao();
+  }, [customer?.token]);
 
   const abrirEdicao = () => {
     if (!customer) return;
@@ -158,11 +191,65 @@ export default function PerfilScreen() {
   };
 
   const handleSelecionarPagamento = async (fp: FormaPagamento) => {
+    if (fp === "cartao" && !savedCard) {
+      try {
+        setPagamentoLoading(true);
+        const config = savedCardConfig ?? await getSavedCardConfig(customer!.token);
+        setSavedCardConfig(config);
+        setPagamentoModal(false);
+        setCardTokenizerVisible(true);
+      } catch (error) {
+        Alert.alert("Cartão indisponível", error instanceof Error ? error.message : "Não foi possível abrir o cadastro seguro.");
+      } finally {
+        setPagamentoLoading(false);
+      }
+      return;
+    }
     if (fp === customer?.formaPagamento) { setPagamentoModal(false); return; }
     setPagamentoLoading(true);
     await updateProfile({ formaPagamento: fp });
     setPagamentoLoading(false);
     setPagamentoModal(false);
+  };
+
+  const handleCardToken = async (cardToken: string) => {
+    if (!customer?.token) return;
+    setCardLoading(true);
+    try {
+      const card = await saveCard(customer.token, cardToken);
+      setSavedCard(card);
+      await updateProfile({ formaPagamento: "cartao" });
+      setCardTokenizerVisible(false);
+      Alert.alert("Cartão salvo", `Final ${card.lastFour}. Agora ele pode ser usado sem preencher os dados a cada corrida.`);
+    } catch (error) {
+      Alert.alert("Não foi possível salvar", error instanceof Error ? error.message : "Confira os dados e tente novamente.");
+      setCardTokenizerVisible(false);
+    } finally {
+      setCardLoading(false);
+    }
+  };
+
+  const handleRemoverCartao = () => {
+    if (!customer?.token || !savedCard) return;
+    Alert.alert("Remover cartão", `Deseja remover o cartão final ${savedCard.lastFour}?`, [
+      { text: "Cancelar", style: "cancel" },
+      {
+        text: "Remover",
+        style: "destructive",
+        onPress: async () => {
+          setCardLoading(true);
+          try {
+            await deleteSavedCard(customer.token, savedCard.cardId);
+            setSavedCard(null);
+            if (customer.formaPagamento === "cartao") await updateProfile({ formaPagamento: null });
+          } catch (error) {
+            Alert.alert("Erro", error instanceof Error ? error.message : "Não foi possível remover o cartão.");
+          } finally {
+            setCardLoading(false);
+          }
+        },
+      },
+    ]);
   };
 
   const handleLogout = () => {
@@ -364,7 +451,9 @@ export default function PerfilScreen() {
             <View style={styles.optInfo}>
               <Text style={[styles.optLabel, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>Forma de pagamento</Text>
               <Text style={[styles.optSub, { color: customer?.formaPagamento ? colors.text : colors.textMuted, fontFamily: "Inter_400Regular" }]}>
-                {customer?.formaPagamento ? `${fpAtual?.label} · ${fpAtual?.desc}` : "Selecione como vai pagar"}
+                {customer?.formaPagamento === "cartao" && savedCard
+                  ? `${savedCard.brand} •••• ${savedCard.lastFour}`
+                  : customer?.formaPagamento ? `${fpAtual?.label} · ${fpAtual?.desc}` : "Selecione como vai pagar"}
               </Text>
             </View>
             {customer?.formaPagamento && (
@@ -513,6 +602,24 @@ export default function PerfilScreen() {
           </Text>
 
           <View style={[styles.pagamentoOptions, { opacity: pagamentoLoading ? 0.6 : 1 }]}>
+            {savedCard && (
+              <View style={[styles.savedCardBox, { backgroundColor: "#009EE312", borderColor: "#009EE340" }]}>
+                <View style={[styles.pagamentoIcon, { backgroundColor: "#009EE320" }]}>
+                  <Feather name="credit-card" size={22} color="#009EE3" />
+                </View>
+                <View style={styles.pagamentoInfo}>
+                  <Text style={[styles.pagamentoLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                    {savedCard.brand} •••• {savedCard.lastFour}
+                  </Text>
+                  <Text style={[styles.pagamentoDesc, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>
+                    Validade {String(savedCard.expirationMonth).padStart(2, "0")}/{String(savedCard.expirationYear).slice(-2)}
+                  </Text>
+                </View>
+                <Pressable onPress={handleRemoverCartao} disabled={cardLoading} testID="remove-saved-card">
+                  {cardLoading ? <ActivityIndicator size="small" color="#EF4444" /> : <Feather name="trash-2" size={18} color="#EF4444" />}
+                </Pressable>
+              </View>
+            )}
             {FORMAS_PAGAMENTO.map(fp => {
               const selected = customer?.formaPagamento === fp.id;
               return (
@@ -530,7 +637,9 @@ export default function PerfilScreen() {
                   </View>
                   <View style={styles.pagamentoInfo}>
                     <Text style={[styles.pagamentoLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>{fp.label}</Text>
-                    <Text style={[styles.pagamentoDesc, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>{fp.desc}</Text>
+                    <Text style={[styles.pagamentoDesc, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>
+                      {fp.id === "cartao" && savedCard ? `Final ${savedCard.lastFour}` : fp.desc}
+                    </Text>
                   </View>
                   {selected && (
                     <View style={[styles.checkCircle, { backgroundColor: fp.color }]}>
@@ -543,11 +652,30 @@ export default function PerfilScreen() {
             })}
           </View>
 
+          {savedCard && (
+            <Pressable
+              style={[styles.trocarCartaoBtn, { borderColor: "#009EE3" }]}
+              onPress={() => { setPagamentoModal(false); setCardTokenizerVisible(true); }}
+              testID="replace-saved-card"
+            >
+              <Feather name="refresh-cw" size={15} color="#009EE3" />
+              <Text style={styles.trocarCartaoText}>Trocar cartão salvo</Text>
+            </Pressable>
+          )}
+
           <Pressable style={styles.modalCancelar} onPress={() => setPagamentoModal(false)}>
             <Text style={[styles.modalCancelarText, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>Fechar</Text>
           </Pressable>
         </View>
       </Modal>
+
+      <MercadoPagoCardTokenizer
+        visible={cardTokenizerVisible}
+        publicKey={savedCardConfig?.publicKey ?? ""}
+        sandbox={savedCardConfig?.sandbox ?? true}
+        onClose={() => setCardTokenizerVisible(false)}
+        onToken={handleCardToken}
+      />
 
       {/* MODAL: ALTERAR SENHA */}
       <Modal visible={senhaModal} transparent animationType="slide" onRequestClose={() => setSenhaModal(false)}>
@@ -706,12 +834,15 @@ const styles = StyleSheet.create({
   erroBox: { flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10, borderWidth: 1, padding: 12 },
   erroText: { color: "#EF4444", fontSize: 13, flex: 1 },
   pagamentoOptions: { gap: 10, marginBottom: 20 },
+  savedCardBox: { flexDirection: "row", alignItems: "center", gap: 14, borderRadius: 14, borderWidth: 1, padding: 16 },
   pagamentoCard: { flexDirection: "row", alignItems: "center", gap: 14, borderRadius: 14, borderWidth: 1, padding: 16 },
   pagamentoIcon: { width: 46, height: 46, borderRadius: 13, alignItems: "center", justifyContent: "center" },
   pagamentoInfo: { flex: 1 },
   pagamentoLabel: { fontSize: 16, marginBottom: 2 },
   pagamentoDesc: { fontSize: 12 },
   checkCircle: { width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center" },
+  trocarCartaoBtn: { height: 46, borderRadius: 12, borderWidth: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 8 },
+  trocarCartaoText: { color: "#009EE3", fontSize: 14, fontWeight: "600" },
   modalBtn: { height: 54, borderRadius: 14, alignItems: "center", justifyContent: "center", marginBottom: 12 },
   modalBtnText: { color: "#fff", fontSize: 16 },
   modalCancelar: { alignItems: "center", paddingVertical: 8 },

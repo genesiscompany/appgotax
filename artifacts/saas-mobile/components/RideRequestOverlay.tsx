@@ -27,6 +27,8 @@ type Corrida = {
   cliente_nome: string;
   cliente_rating: number;
   cliente_avaliacoes: number;
+  forma_pagamento?: string | null;
+  payment_source?: string | null;
 };
 
 const TIPO_LABEL: Record<string, string> = {
@@ -166,6 +168,9 @@ export default function RideRequestOverlay({
   const timerColor = timer <= 10 ? "#EF4444" : "#1DB954";
   const icon = TIPO_ICON[corrida.tipo_servico] || "🚗";
   const tipoLabel = TIPO_LABEL[corrida.tipo_servico] || "Corrida";
+  const paymentLabel = corrida.payment_source === "mercado_pago"
+    ? "Pago pelo app"
+    : `Cobrar do cliente${corrida.forma_pagamento ? ` · ${corrida.forma_pagamento.replace(/_/g, " ")}` : ""}`;
 
   return (
     <Modal transparent animationType="none" visible={!!corrida} onRequestClose={() => {}}>
@@ -193,6 +198,7 @@ export default function RideRequestOverlay({
 
           {/* Price */}
           <Text style={s.price}>{fmtMoney(corrida.valor_estimado)}</Text>
+          <Text style={[s.payment, corrida.payment_source === "mercado_pago" && s.paymentApp]}>{paymentLabel}</Text>
 
           {/* Client info */}
           <View style={s.clientRow}>
@@ -299,6 +305,8 @@ const s = StyleSheet.create({
   xBtn: { width: 36, height: 36, borderRadius: 10, backgroundColor: "#2A2A2A", justifyContent: "center", alignItems: "center" },
   xBtnTxt: { color: "#888", fontSize: 14, fontWeight: "700" },
   price: { fontSize: 46, fontWeight: "900", color: "#FFF", letterSpacing: -1 },
+  payment: { alignSelf: "flex-start", color: "#FCD34D", backgroundColor: "#3B2F0E", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, fontSize: 12, fontWeight: "700", textTransform: "capitalize" },
+  paymentApp: { color: "#86EFAC", backgroundColor: "#123322" },
   clientRow: { flexDirection: "row", gap: 10, alignItems: "center" },
   ratingPill: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#2A2A2A", borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 },
   ratingStar: { color: "#F5C518", fontSize: 14 },

@@ -5,6 +5,8 @@
  * SaaS Multi-Empresas API
  * OpenAPI spec version: 0.1.0
  */
+import type { CorridaPaymentSource } from "./corridaPaymentSource";
+import type { CorridaPaymentStatus } from "./corridaPaymentStatus";
 import type { CorridaStatus } from "./corridaStatus";
 
 export interface Corrida {
@@ -16,5 +18,7 @@ export interface Corrida {
   valor: number;
   distanciaKm?: number | null;
   motoristaNome?: string | null;
+  paymentSource?: CorridaPaymentSource;
+  paymentStatus?: CorridaPaymentStatus;
   criadoEm: Date;
 }

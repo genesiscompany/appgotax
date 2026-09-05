@@ -5,6 +5,7 @@
  * SaaS Multi-Empresas API
  * OpenAPI spec version: 0.1.0
  */
+import type { CreateEntregaRequestPaymentSource } from "./createEntregaRequestPaymentSource";
 
 export interface CreateEntregaRequest {
   remetenteNome: string;
@@ -15,4 +16,5 @@ export interface CreateEntregaRequest {
   enderecoEntrega: string;
   descricaoPacote?: string;
   valor: number;
+  paymentSource?: CreateEntregaRequestPaymentSource;
 }

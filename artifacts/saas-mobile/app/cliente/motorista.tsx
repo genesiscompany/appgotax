@@ -8,24 +8,32 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
 import * as Location from "expo-location";
+import * as Clipboard from "expo-clipboard";
 import Colors from "@/constants/colors";
 import GoogleMap from "@/components/GoogleMap";
 import type { LatLng } from "@/components/GoogleMap";
 import { useAuthGate } from "@/components/AuthGate";
 import { useCustomerAuth } from "@/context/CustomerAuthContext";
-import PaymentSelector from "@/components/PaymentSelector";
-import { getWallet, checkoutPayment } from "@/api/payments";
-import * as Linking from "expo-linking";
+import { checkoutPayment, getPaymentOptions, getSavedCard, getServicePaymentStatus, type PaymentOptions, type SavedCard } from "@/api/payments";
+import MercadoPagoCardTokenizer from "@/components/MercadoPagoCardTokenizer";
+import { getSavedCardConfig, type SavedCardConfig } from "@/api/payments";
 
 const MOD_COLOR = Colors.modules.motorista;
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api` : "/api";
 const EMPRESA_ID = 2;
 
-const PAGAMENTOS = [
-  { id: "dinheiro", label: "Dinheiro", icone: "dollar-sign" as const },
-  { id: "pix", label: "Pix", icone: "smartphone" as const },
-  { id: "cartao", label: "Cartão", icone: "credit-card" as const },
-];
+type PaymentChoice = "dinheiro" | "pix_direto" | "maquininha" | "pix_app" | "card_app" | "wallet";
+
+function paymentPayload(choice: PaymentChoice) {
+  if (choice === "pix_app") return { forma_pagamento: "pix", payment_source: "mercado_pago" as const, checkoutMethod: "pix" as const };
+  if (choice === "card_app") return { forma_pagamento: "cartao", payment_source: "mercado_pago" as const, checkoutMethod: "cartao" as const };
+  if (choice === "wallet") return { forma_pagamento: "credito", payment_source: "wallet" as const, checkoutMethod: "wallet" as const };
+  return {
+    forma_pagamento: choice === "pix_direto" ? "pix" : choice,
+    payment_source: "direto" as const,
+    checkoutMethod: null,
+  };
+}
 
 interface Categoria {
   id: number;
@@ -97,20 +105,23 @@ export default function ClienteMotorista() {
   const [catLoading, setCatLoading] = useState(true);
   const [catSel, setCatSel] = useState<number | null>(null);
   const [distanciaKm, setDistanciaKm] = useState(0);
-  const [pagamento, setPagamento] = useState("dinheiro");
-  const [paymentSource, setPaymentSource] = useState<"direto" | "mercado_pago" | null>(null);
-  const [walletBalance, setWalletBalance] = useState(0);
-
-  useEffect(() => {
-    if (customer?.token) {
-      getWallet(customer.token).then(d => setWalletBalance(d.balanceCents)).catch(() => {});
-    }
-  }, [customer?.token]);
+  const [pagamento, setPagamento] = useState<PaymentChoice>("dinheiro");
+  const [paymentOptions, setPaymentOptions] = useState<PaymentOptions>({
+    receber_direto: true, mercado_pago: false, carteira: false, beta: false, sandbox: false,
+  });
+  const [savedCard, setSavedCard] = useState<SavedCard | null>(null);
+  const [savedCardConfig, setSavedCardConfig] = useState<SavedCardConfig | null>(null);
+  const [savedCardTokenizerVisible, setSavedCardTokenizerVisible] = useState(false);
   
-  const [creditoDisponivel, setCreditoDisponivel] = useState(0);
   const [estado, setEstado] = useState<"idle" | "buscando" | "aguardando" | "caminho" | "chegou">("idle");
   const [corridaId, setCorridaId] = useState<number | null>(null);
   const [corridaData, setCorridaData] = useState<any>(null);
+  const [servicePaymentReferenceId, setServicePaymentReferenceId] = useState<number | null>(null);
+  const [pixCopiaECola, setPixCopiaECola] = useState("");
+  const servicePaymentReferenceRef = useRef<number | null>(null);
+  const cardPaymentReferenceRef = useRef<number | null>(null);
+  const cardRetryReferenceRef = useRef<number | null>(null);
+  const cardRetryPromptedRef = useRef<Set<number>>(new Set());
   const [eta, setEta] = useState(4);
   const [driverPos, setDriverPos] = useState<LatLng>(LOCATIONS.motorista_start);
   const [motoristasDisponiveis, setMotoristasDisponiveis] = useState<Array<{ id: number; nome: string; lat: number; lng: number; veiculo_modelo?: string; veiculo_cor?: string }>>([]);
@@ -123,17 +134,6 @@ export default function ClienteMotorista() {
   const [msgSending, setMsgSending] = useState(false);
   const chatPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const flatListRef = useRef<FlatList>(null);
-
-  // ── Load credit balance ────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!customer?.token) return;
-    fetch(`${API_BASE}/cliente/afiliados/credito`, {
-      headers: { Authorization: `Bearer ${customer.token}` },
-    })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.saldo > 0) setCreditoDisponivel(Number(d.saldo)); })
-      .catch(() => {});
-  }, [customer?.token]);
 
   const fetchMensagens = useCallback(async (id: number) => {
     try {
@@ -173,6 +173,32 @@ export default function ClienteMotorista() {
     setMsgSending(false);
   };
   const topPadding = insets.top;
+
+  useEffect(() => {
+    if (customer?.formaPagamento) {
+      setPagamento(customer.formaPagamento === "pix" ? "pix_direto" : customer.formaPagamento === "cartao" ? "card_app" : customer.formaPagamento);
+    }
+  }, [customer?.formaPagamento]);
+
+  useEffect(() => {
+    if (!customer?.token) { setSavedCard(null); return; }
+    getSavedCard(customer.token).then(setSavedCard).catch(() => setSavedCard(null));
+  }, [customer?.token]);
+
+  useEffect(() => {
+    getPaymentOptions(EMPRESA_ID, customer?.token)
+      .then(options => {
+        setPaymentOptions(options);
+        setPagamento(current => {
+          const isDirect = current === "dinheiro" || current === "pix_direto" || current === "maquininha";
+          if ((isDirect && options.receber_direto) || ((current === "pix_app" || current === "card_app") && options.mercado_pago) || (current === "wallet" && options.carteira)) return current;
+          if (options.mercado_pago) return "pix_app";
+          if (options.carteira) return "wallet";
+          return "dinheiro";
+        });
+      })
+      .catch(() => setPaymentOptions(prev => ({ ...prev, mercado_pago: false, carteira: false })));
+  }, [customer?.token]);
 
   const catSelecionada = categorias.find(c => c.id === catSel) ?? null;
   const preco = catSelecionada && distanciaKm > 0
@@ -378,6 +404,17 @@ export default function ClienteMotorista() {
         setEstado("chegou");
       } else if (data.status === "concluida" || data.status === "cancelada") {
         if (pollRef.current) clearInterval(pollRef.current);
+        if (data.status === "concluida" && servicePaymentReferenceRef.current === id) {
+          cardPaymentReferenceRef.current = null;
+          cardRetryReferenceRef.current = null;
+          cardRetryPromptedRef.current.delete(id);
+          setEstado("chegou");
+          return;
+        }
+        servicePaymentReferenceRef.current = null;
+        cardPaymentReferenceRef.current = null;
+        cardRetryReferenceRef.current = null;
+        cardRetryPromptedRef.current.delete(id);
         setEstado("idle");
         setCorridaId(null);
         setCorridaData(null);
@@ -397,16 +434,89 @@ export default function ClienteMotorista() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [corridaId, pollStatus]);
 
-  const handleChamar = () => {
+  useEffect(() => {
+    servicePaymentReferenceRef.current = servicePaymentReferenceId;
+    if (!servicePaymentReferenceId || !customer?.token) return;
+    let active = true;
+    const pollPayment = async () => {
+      try {
+        const payment = await getServicePaymentStatus(customer.token, "motorista", servicePaymentReferenceId);
+        if (!active) return;
+        if (payment.pix?.copyPaste) setPixCopiaECola(payment.pix.copyPaste);
+        setCorridaData((current: any) => ({
+          ...(current ?? {}),
+          paymentSource: payment.paymentSource ?? current?.paymentSource ?? "mercado_pago",
+          paymentStatus: payment.paymentStatus,
+        }));
+        if (payment.paymentStatus === "pago") {
+          cardPaymentReferenceRef.current = null;
+          cardRetryReferenceRef.current = null;
+          cardRetryPromptedRef.current.delete(servicePaymentReferenceId);
+          clearInterval(timer);
+        } else if (
+          payment.paymentStatus === "rejeitado"
+          && cardPaymentReferenceRef.current === servicePaymentReferenceId
+          && !cardRetryPromptedRef.current.has(servicePaymentReferenceId)
+        ) {
+          cardRetryPromptedRef.current.add(servicePaymentReferenceId);
+          Alert.alert(
+            "Pagamento recusado",
+            "Confirme novamente o CVV do cartão salvo para tentar o pagamento desta mesma corrida.",
+            [
+              { text: "Agora não", style: "cancel" },
+              {
+                text: "Tentar novamente",
+                onPress: async () => {
+                  try {
+                    const config = await getSavedCardConfig(customer.token);
+                    if (!active) return;
+                    setSavedCardConfig(config);
+                    cardRetryReferenceRef.current = servicePaymentReferenceId;
+                    setSavedCardTokenizerVisible(true);
+                  } catch (error) {
+                    Alert.alert("Cartão indisponível", error instanceof Error ? error.message : "Não foi possível abrir a confirmação segura.");
+                  }
+                },
+              },
+            ],
+          );
+        }
+      } catch {}
+    };
+    const timer = setInterval(pollPayment, 4000);
+    pollPayment();
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [servicePaymentReferenceId, customer?.token]);
+
+  const handleChamar = (paymentToken?: string) => {
     if (!destinoText || !catSel) return;
     requireAuth(async () => {
-      setEstado("buscando");
-      try {
-        if (pagamento === "credito_gotaxi" && creditoDisponivel < preco) {
-          setEstado("idle");
-          Alert.alert("Crédito insuficiente", `Seu saldo GoTaxi é R$ ${creditoDisponivel.toFixed(2)}. A corrida custa R$ ${preco.toFixed(2)}.`);
+      if (pagamento === "card_app" && !paymentToken) {
+        if (!customer?.token || !savedCard) {
+          Alert.alert("Cartão necessário", "Cadastre um cartão em Perfil > Pagamento antes de continuar.");
           return;
         }
+        try {
+          setSavedCardConfig(await getSavedCardConfig(customer.token));
+          setSavedCardTokenizerVisible(true);
+        } catch (error) {
+          Alert.alert("Cartão indisponível", error instanceof Error ? error.message : "Não foi possível abrir a confirmação segura.");
+        }
+        return;
+      }
+      cardRetryReferenceRef.current = null;
+      cardRetryPromptedRef.current.clear();
+      setEstado("buscando");
+      try {
+        if (!customer?.token) {
+          setEstado("idle");
+          Alert.alert("Login necessário", "Entre na sua conta para solicitar a corrida.");
+          return;
+        }
+        const selectedPayment = paymentPayload(pagamento);
         const body = {
           empresa_id: EMPRESA_ID,
           passageiro_nome: customer?.nome || "Cliente",
@@ -414,7 +524,8 @@ export default function ClienteMotorista() {
           origem_endereco: origemText,
           destino_endereco: destinoText,
           tipo_veiculo: catSelecionada?.nome || "GoTaxi X",
-          forma_pagamento: pagamento,
+          forma_pagamento: selectedPayment.forma_pagamento,
+          payment_source: selectedPayment.payment_source,
           distancia_km: distanciaKm,
           valor: preco,
           lat_origem: origemLatLng.lat,
@@ -422,8 +533,10 @@ export default function ClienteMotorista() {
           lat_destino: destinoLatLng.lat,
           lng_destino: destinoLatLng.lng,
         };
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (customer?.token) headers["Authorization"] = `Bearer ${customer.token}`;
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${customer.token}`,
+        };
         const res = await fetch(`${API_BASE}/motorista/solicitar`, {
           method: "POST",
           headers,
@@ -431,27 +544,57 @@ export default function ClienteMotorista() {
         });
         if (res.ok) {
           const corrida = await res.json();
-          
-          if (paymentSource === "mercado_pago") {
+          let cardCheckoutRejected = false;
+          if (selectedPayment.checkoutMethod) {
             try {
-              const checkout = await checkoutPayment(customer?.token || "", {
+              const checkout = await checkoutPayment(customer.token, {
                 module: "motorista",
                 referenceId: corrida.id,
-                paymentSource: "mercado_pago",
-                mercadoPagoMethod: pagamento as any
+                paymentSource: selectedPayment.payment_source,
+                mercadoPagoMethod: selectedPayment.checkoutMethod,
+                ...(selectedPayment.checkoutMethod === "cartao" && paymentToken ? { paymentToken } : {}),
               });
-              if (checkout.sandboxInitPoint) {
-                Linking.openURL(checkout.sandboxInitPoint);
-              } else if (checkout.initPoint) {
-                Linking.openURL(checkout.initPoint);
+              if (checkout.status === "rejected") {
+                if (selectedPayment.checkoutMethod === "cartao") {
+                  cardCheckoutRejected = true;
+                } else {
+                  throw new Error(checkout.message || "Pagamento não autorizado");
+                }
               }
-            } catch (e: any) {
-              Alert.alert("Aviso", "Corrida solicitada, mas houve falha ao iniciar o Mercado Pago.");
+            } catch (checkoutError) {
+              const stagingMessage = checkoutError instanceof Error ? checkoutError.message : "Falha ao preparar pagamento";
+              try {
+                const cancelResponse = await fetch(`${API_BASE}/payments/services/motorista/${corrida.id}/cancel`, {
+                  method: "POST",
+                  headers,
+                });
+                if (!cancelResponse.ok) {
+                  throw new Error("cancel_failed");
+                }
+              } catch {
+                throw new Error(`${stagingMessage}. O cancelamento automático também falhou; esta corrida não será apresentada como pronta.`);
+              }
+              throw new Error(stagingMessage);
             }
           }
-
-          if (pagamento === "credito_gotaxi") {
-            setCreditoDisponivel(prev => Math.max(0, prev - preco));
+          if (pagamento === "pix_app" || pagamento === "card_app") {
+            setPixCopiaECola("");
+            setServicePaymentReferenceId(corrida.id);
+            servicePaymentReferenceRef.current = corrida.id;
+            if (pagamento === "card_app") {
+              cardPaymentReferenceRef.current = corrida.id;
+              cardRetryPromptedRef.current.delete(corrida.id);
+              if (cardCheckoutRejected) {
+                setCorridaData({ ...corrida, paymentSource: "mercado_pago", paymentStatus: "rejeitado" });
+              }
+            } else {
+              cardPaymentReferenceRef.current = null;
+            }
+          } else {
+            setServicePaymentReferenceId(null);
+            servicePaymentReferenceRef.current = null;
+            cardPaymentReferenceRef.current = null;
+            setPixCopiaECola("");
           }
           setCorridaId(corrida.id);
           setTimeout(() => setEstado("aguardando"), 1500);
@@ -461,17 +604,9 @@ export default function ClienteMotorista() {
           Alert.alert("Erro", err.message || "Não foi possível solicitar a corrida. Tente novamente.");
         }
       } catch (e) {
-        // Fallback to demo mode
-        setCorridaId(9999);
-        setCorridaData({
-          motorista_nome: "Carlos Silva",
-          motorista_nome_real: "Carlos Silva",
-          motorista_veiculo: "Honda Civic",
-          motorista_placa: "ABC-1234",
-          motorista_cor: "Prata",
-          motorista_avaliacao: "4.9",
-        });
-        setTimeout(() => { setEstado("caminho"); setDriverPos(LOCATIONS.motorista_start); setEta(4); }, 2500);
+        setEstado("idle");
+        setCorridaId(null);
+        Alert.alert("Não foi possível solicitar", e instanceof Error ? e.message : "Verifique sua conexão e tente novamente.");
       }
     });
   };
@@ -479,18 +614,80 @@ export default function ClienteMotorista() {
   const handleCancelar = async () => {
     if (corridaId) {
       try {
-        await fetch(`${API_BASE}/motorista/corridas/${corridaId}/status`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "cancelada" }),
+        if (!customer?.token) throw new Error("unauthorized");
+        const response = await fetch(`${API_BASE}/payments/services/motorista/${corridaId}/cancel`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${customer.token}`,
+          },
         });
-      } catch (_) {}
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          Alert.alert("Não foi possível cancelar", error.message || "A corrida já está sendo finalizada.");
+          return;
+        }
+      } catch (_) {
+        Alert.alert("Não foi possível cancelar", "Verifique sua conexão e tente novamente.");
+        return;
+      }
       if (pollRef.current) clearInterval(pollRef.current);
     }
     setEstado("idle");
     setCorridaId(null);
     setCorridaData(null);
+    setServicePaymentReferenceId(null);
+    servicePaymentReferenceRef.current = null;
+    cardPaymentReferenceRef.current = null;
+    cardRetryReferenceRef.current = null;
+    if (corridaId) cardRetryPromptedRef.current.delete(corridaId);
+    setPixCopiaECola("");
   };
+
+  const handleSavedCardToken = async (token: string) => {
+    setSavedCardTokenizerVisible(false);
+    const retryReferenceId = cardRetryReferenceRef.current;
+    cardRetryReferenceRef.current = null;
+    if (!retryReferenceId) {
+      handleChamar(token);
+      return;
+    }
+    if (!customer?.token) return;
+    try {
+      setCorridaData((current: any) => ({ ...(current ?? {}), paymentStatus: "pendente" }));
+      const checkout = await checkoutPayment(customer.token, {
+        module: "motorista",
+        referenceId: retryReferenceId,
+        paymentSource: "mercado_pago",
+        mercadoPagoMethod: "cartao",
+        paymentToken: token,
+      });
+      if (checkout.status === "rejected") {
+        setCorridaData((current: any) => ({ ...(current ?? {}), paymentStatus: "rejeitado" }));
+        Alert.alert("Pagamento recusado", checkout.message || "Não foi possível autorizar o cartão.");
+      } else {
+        setCorridaData((current: any) => ({ ...(current ?? {}), paymentStatus: "pendente" }));
+      }
+    } catch (error) {
+      setCorridaData((current: any) => ({ ...(current ?? {}), paymentStatus: "rejeitado" }));
+      Alert.alert("Não foi possível tentar novamente", error instanceof Error ? error.message : "Confira o CVV e tente mais tarde.");
+    }
+  };
+
+  const savedCardTokenizer = (
+    <MercadoPagoCardTokenizer
+      visible={savedCardTokenizerVisible}
+      publicKey={savedCardConfig?.publicKey ?? ""}
+      sandbox={savedCardConfig?.sandbox ?? false}
+      mode="saved"
+      cardId={savedCard?.cardId}
+      onClose={() => {
+        cardRetryReferenceRef.current = null;
+        setSavedCardTokenizerVisible(false);
+      }}
+      onToken={handleSavedCardToken}
+    />
+  );
 
   const origemLatLngMap = { ...origemLatLng, label: origemText };
   const destinoLatLngMap = { ...destinoLatLng, label: destinoText };
@@ -498,6 +695,22 @@ export default function ClienteMotorista() {
   const motoristaVeiculo = corridaData?.motorista_veiculo || corridaData?.ma_veiculo || "Veículo";
   const motoristaPlaca = corridaData?.motorista_placa || corridaData?.ma_placa || "---";
   const motoristaCor = corridaData?.motorista_cor || corridaData?.veiculo_cor || "";
+  const pagamentoAtual = corridaData?.forma_pagamento || pagamento;
+  const rawPaymentSourceAtual = corridaData?.paymentSource ?? corridaData?.source ?? corridaData?.payment_source;
+  const paymentSourceAtual = rawPaymentSourceAtual === "carteira" ? "wallet" : rawPaymentSourceAtual;
+  const rawPaymentStatusAtual = corridaData?.paymentStatus ?? corridaData?.payment_status ?? corridaData?.pagamento_status ?? "";
+  const paymentStatusAtual = rawPaymentStatusAtual === "approved" ? "pago"
+    : ["pending", "in_process"].includes(rawPaymentStatusAtual)
+      ? "pendente"
+      : corridaData?.paymentStatus ?? corridaData?.payment_status ?? corridaData?.pagamento_status;
+  const pagamentoNoApp = paymentSourceAtual === "mercado_pago" || paymentSourceAtual === "wallet";
+  const pagamentoAprovado = pagamentoNoApp && paymentStatusAtual === "pago";
+  const corridaConcluida = corridaData?.status === "concluida";
+  const resumoPagamento = pagamentoAprovado
+    ? "Pago pelo app"
+    : pagamentoNoApp
+      ? `Pagamento pendente${pagamentoAtual ? ` • ${String(pagamentoAtual).toUpperCase()}` : ""}`
+      : `Pagamento direto${pagamentoAtual ? ` • ${String(pagamentoAtual).toUpperCase()}` : ""}`;
   const motoristaRating = corridaData?.motorista_avaliacao ?? corridaData?.ma_avaliacao ?? "4.9";
   const motoristaIniciais = motoristaNome.split(" ").map((n: string) => n[0]).slice(0, 2).join("").toUpperCase();
   if (estado === "caminho") {
@@ -685,6 +898,7 @@ export default function ClienteMotorista() {
           </KeyboardAvoidingView>
         </View>
       </Modal>
+      {savedCardTokenizer}
       </>
     );
   }
@@ -714,10 +928,10 @@ export default function ClienteMotorista() {
           <View style={styles.sheetTitleRow}>
             <View>
               <Text style={[styles.sheetTitle, { color: "#10B981", fontFamily: "Inter_700Bold" }]}>
-                Você chegou! 🎉
+                {corridaConcluida ? "Corrida concluída" : "Você chegou! 🎉"}
               </Text>
               <Text style={[styles.sheetSub, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                Aguardando finalização do motorista
+                {corridaConcluida ? (pagamentoAprovado ? "Pagamento confirmado" : "Finalize o pagamento abaixo") : "Aguardando finalização do motorista"}
               </Text>
             </View>
             <View style={[styles.etaMiniBadge, { backgroundColor: "#10B98118", borderColor: "#10B98140" }]}>
@@ -751,11 +965,36 @@ export default function ClienteMotorista() {
                 R$ {preco.toFixed(2).replace(".", ",")}
               </Text>
               <Text style={[styles.ratingNum, { color: colors.textSecondary, fontFamily: "Inter_400Regular", marginTop: 2 }]}>
-                Pagamento em dinheiro • Aguardando motorista
+                 {resumoPagamento}{pagamentoNoApp && !pagamentoAprovado && !corridaConcluida ? " • será confirmado ao concluir" : !corridaConcluida ? " • Aguardando motorista" : ""}
               </Text>
             </View>
           </View>
+          {servicePaymentReferenceId && pixCopiaECola && !pagamentoAprovado && (
+            <View style={[styles.pixPaymentCard, { backgroundColor: isDark ? "#172033" : "#EFF6FF", borderColor: "#3B82F640" }]}>
+              <View style={styles.pixPaymentTitleRow}>
+                <Feather name="smartphone" size={18} color="#2563EB" />
+                <Text style={[styles.pixPaymentTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Pague o Pix pelo app</Text>
+              </View>
+              <Text style={[styles.pixPaymentHint, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                Copie o código abaixo e pague no aplicativo do seu banco. A confirmação será automática.
+              </Text>
+              <Text style={[styles.pixPaymentCode, { color: colors.text, fontFamily: "Inter_400Regular" }]} numberOfLines={2}>
+                {pixCopiaECola}
+              </Text>
+              <Pressable
+                style={styles.pixCopyButton}
+                onPress={async () => {
+                  await Clipboard.setStringAsync(pixCopiaECola);
+                  Alert.alert("Código copiado", "Cole o Pix copia e cola no aplicativo do seu banco.");
+                }}
+              >
+                <Feather name="copy" size={15} color="#fff" />
+                <Text style={[styles.pixCopyButtonText, { fontFamily: "Inter_600SemiBold" }]}>Copiar código Pix</Text>
+              </Pressable>
+            </View>
+          )}
         </View>
+        {savedCardTokenizer}
       </View>
     );
   }
@@ -780,12 +1019,17 @@ export default function ClienteMotorista() {
             <Text style={[styles.cancelBtnSmText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Cancelar</Text>
           </Pressable>
         </View>
+        {savedCardTokenizer}
       </View>
     );
   }
 
-  const canChamar = !!destinoText && !!catSel;
-
+  const pagamentoDisponivel = pagamento === "pix_app" || pagamento === "card_app"
+    ? paymentOptions.mercado_pago
+    : pagamento === "wallet"
+      ? paymentOptions.carteira
+      : paymentOptions.receber_direto;
+  const canChamar = !!destinoText && !!catSel && pagamentoDisponivel;
   const driverMarkers = motoristasDisponiveis.map(m => ({
     lat: m.lat, lng: m.lng,
     label: m.nome.split(" ")[0],
@@ -950,33 +1194,32 @@ export default function ClienteMotorista() {
 
         {/* Pagamento */}
         <Text style={[styles.tipoLabel, { color: colors.text, fontFamily: "Inter_600SemiBold", marginBottom: 10 }]}>Pagamento</Text>
-        <PaymentSelector
-          empresaId={EMPRESA_ID}
-          token={customer?.token}
-          colors={colors}
-          accentColor={MOD_COLOR}
-          directMethods={[
-            ...PAGAMENTOS,
-            ...(creditoDisponivel > 0
-              ? [{ id: "credito_gotaxi", label: `Crédito GoTaxi\nR$ ${creditoDisponivel.toFixed(2)}`, icone: "award" as const }]
-              : [])
-          ].map(p => ({
-            id: p.id,
-            label: p.label,
-            icon: p.icone,
-            color: p.id === "credito_gotaxi" ? "#7C3AED" : MOD_COLOR
-          }))}
-          selectedSource={paymentSource}
-          onSourceSelect={(src) => setPaymentSource(src)}
-          selectedMethod={pagamento}
-          onMethodSelect={(m) => setPagamento(m)}
-          walletBalanceCents={walletBalance}
-        />
+        <View style={styles.paymentChoices}>
+          {([
+            ...(paymentOptions.receber_direto ? [
+              { id: "dinheiro", label: "Dinheiro" },
+              { id: "pix_direto", label: "Pix direto" },
+              { id: "maquininha", label: "Maquininha" },
+            ] : []),
+            ...(paymentOptions.mercado_pago ? [{ id: "pix_app", label: "Pix pelo app" }] : []),
+            ...(paymentOptions.mercado_pago && savedCard ? [{ id: "card_app", label: `Cartão •••• ${savedCard.lastFour}` }] : []),
+            ...(paymentOptions.carteira ? [{ id: "wallet", label: "Carteira" }] : []),
+          ] as { id: PaymentChoice; label: string }[]).map(option => (
+            <Pressable
+              key={option.id}
+              onPress={() => setPagamento(option.id)}
+              style={[styles.paymentChoice, { borderColor: pagamento === option.id ? MOD_COLOR : colors.border, backgroundColor: pagamento === option.id ? MOD_COLOR + "18" : colors.backgroundSecondary }]}
+            >
+              <Feather name={option.id === "wallet" || option.id === "card_app" ? "credit-card" : option.id.includes("pix") ? "smartphone" : "dollar-sign"} size={15} color={pagamento === option.id ? MOD_COLOR : colors.textMuted} />
+              <Text style={[styles.paymentChoiceText, { color: pagamento === option.id ? MOD_COLOR : colors.text, fontFamily: "Inter_500Medium" }]}>{option.label}</Text>
+            </Pressable>
+          ))}
+        </View>
 
         {/* Botão chamar */}
         <Pressable
           style={[styles.chamarBtn, { backgroundColor: canChamar ? MOD_COLOR : colors.backgroundSecondary }]}
-          onPress={handleChamar}
+          onPress={() => handleChamar()}
           disabled={!canChamar}
         >
           <Feather name="navigation" size={20} color={canChamar ? "#fff" : colors.textMuted} />
@@ -994,6 +1237,7 @@ export default function ClienteMotorista() {
         </View>
         <View style={{ height: insets.bottom + 20 }} />
       </ScrollView>
+      {savedCardTokenizer}
     </View>
   );
 }
@@ -1031,9 +1275,13 @@ const styles = StyleSheet.create({
   sugestaoItem: { flexDirection: "row", alignItems: "flex-start", paddingHorizontal: 14, paddingVertical: 12 },
   sugestaoMain: { fontSize: 14, lineHeight: 18 },
   sugestaoSec: { fontSize: 12, lineHeight: 16, marginTop: 1 },
-  pagamentosRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
-  pagChip: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1.5, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
-  pagText: { fontSize: 13 },
+  paymentSummary: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, marginBottom: 14 },
+  paymentSummaryInfo: { flexDirection: "row", alignItems: "center", gap: 9 },
+  paymentSummaryText: { fontSize: 14 },
+  paymentChangeText: { fontSize: 14 },
+  paymentChoices: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 14 },
+  paymentChoice: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderRadius: 12, paddingHorizontal: 11, paddingVertical: 9 },
+  paymentChoiceText: { fontSize: 13 },
   chamarBtn: { height: 54, borderRadius: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },
   chamarBtnText: { fontSize: 16 },
   quickLinks: { flexDirection: "row", alignItems: "center", justifyContent: "center", marginTop: 12, gap: 12 },
@@ -1057,6 +1305,13 @@ const styles = StyleSheet.create({
   driverInitials: { color: "#fff", fontSize: 20 },
   driverInfo: { flex: 1, gap: 4 },
   driverName: { fontSize: 16 },
+  pixPaymentCard: { borderWidth: 1, borderRadius: 14, padding: 14, gap: 10 },
+  pixPaymentTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  pixPaymentTitle: { fontSize: 15 },
+  pixPaymentHint: { fontSize: 12, lineHeight: 17 },
+  pixPaymentCode: { fontSize: 11, lineHeight: 16 },
+  pixCopyButton: { minHeight: 42, borderRadius: 10, backgroundColor: "#2563EB", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  pixCopyButtonText: { color: "#fff", fontSize: 14 },
   starsRow: { flexDirection: "row", alignItems: "center", gap: 2 },
   ratingNum: { fontSize: 12 },
   carBadgesRow: { flexDirection: "row", gap: 6, flexWrap: "wrap", marginTop: 2 },

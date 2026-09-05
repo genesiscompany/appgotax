@@ -52,6 +52,9 @@ export default function CorridaAtiva() {
     categoriaName: string;
     valorEstimado: string;
     clienteNome: string;
+    paymentSource: string;
+    formaPagamento: string;
+    paymentStatus: string;
   }>();
 
   const corridaId = Number(params.corridaId);
@@ -68,6 +71,11 @@ export default function CorridaAtiva() {
   const [actionLoading, setActionLoading] = useState(false);
   const [chegouDestino, setChegouDestino] = useState(false);
   const [mostrarPix, setMostrarPix] = useState(false);
+  const [paymentInfo, setPaymentInfo] = useState({
+    source: params.paymentSource || "direto",
+    method: params.formaPagamento || "",
+    status: params.paymentStatus || "",
+  });
 
   const mapRef = useRef<MapView>(null);
   const locationSub = useRef<Location.LocationSubscription | null>(null);
@@ -158,6 +166,13 @@ export default function CorridaAtiva() {
         });
         if (!res.ok) return;
         const data = await res.json();
+        if (data) {
+          setPaymentInfo({
+            source: data.paymentSource ?? data.source ?? data.payment_source ?? params.paymentSource ?? "direto",
+            method: data.forma_pagamento ?? params.formaPagamento ?? "",
+            status: data.paymentStatus ?? data.payment_status ?? data.pagamento_status ?? params.paymentStatus ?? "",
+          });
+        }
         if (data === null || data?.status === "cancelada") {
           clearInterval(statusPollRef);
           Alert.alert(
@@ -169,7 +184,7 @@ export default function CorridaAtiva() {
       } catch (_) {}
     }, 5000);
     return () => clearInterval(statusPollRef);
-  }, [proUser?.token]);
+  }, [proUser?.token, params.formaPagamento, params.paymentSource, params.paymentStatus]);
 
   const handleCancelar = async () => {
     if (motivoSel === null) return;
@@ -334,7 +349,8 @@ export default function CorridaAtiva() {
             setActionLoading(true);
             try {
               const res = await fetch(`${API_BASE}/motorista-app/corrida/${corridaId}/finalizar`, {
-                method: "POST", headers,
+                method: "POST",
+                headers: { ...headers, "Idempotency-Key": `motorista-corrida-finalizar-${corridaId}` },
               });
               if (res.ok) {
                 router.replace("/pro/(tabs)/inicio");
@@ -353,6 +369,24 @@ export default function CorridaAtiva() {
 
   const destCoords = fase === "embarque" ? pickupCoords : destinoCoords;
   const destAddress = fase === "embarque" ? params.origemEndereco : params.destinoEndereco;
+  const paymentMethod = paymentInfo.method.toLowerCase();
+  const paymentSource = paymentInfo.source === "carteira" ? "wallet" : paymentInfo.source;
+  const paymentStatus = paymentInfo.status === "approved" ? "pago"
+    : ["pending", "in_process"].includes(paymentInfo.status) ? "pendente"
+      : paymentInfo.status;
+  const isPixDireto = paymentSource === "direto" && paymentMethod.includes("pix");
+  const pagamentoNoApp = paymentSource === "mercado_pago" || paymentSource === "wallet";
+  const pagamentoPago = pagamentoNoApp && paymentStatus === "pago";
+  const paymentLabel = pagamentoPago
+    ? "Pago pelo app"
+    : pagamentoNoApp
+      ? "Pagamento pendente"
+      : "Pagamento direto";
+  const paymentDescription = pagamentoPago
+    ? "Pagamento confirmado no app"
+    : pagamentoNoApp
+      ? `Aguardando confirmação automática pelo app${paymentMethod ? ` • ${paymentMethod.toUpperCase()}` : ""}`
+      : `${paymentMethod ? paymentMethod.toUpperCase() : "Combine com o passageiro"} • receba diretamente`;
 
   const initialRegion: Region = currentLocation
     ? {
@@ -456,6 +490,11 @@ export default function CorridaAtiva() {
           </TouchableOpacity>
         </View>
 
+        <View style={[s.paymentStatus, pagamentoPago ? s.paymentPaid : pagamentoNoApp ? s.paymentPending : s.paymentDirect]}>
+          <Text style={s.paymentStatusTitle}>{pagamentoPago ? "✓ " : pagamentoNoApp ? "⌛ " : "↗ "}{paymentLabel}</Text>
+          <Text style={s.paymentStatusDescription}>{paymentDescription}</Text>
+        </View>
+
         {/* Destination address */}
         <View style={s.addrRow}>
           <Text style={s.addrIcon}>{fase === "embarque" ? "📍" : "🏁"}</Text>
@@ -479,7 +518,7 @@ export default function CorridaAtiva() {
         </View>
 
         {/* Toggle PIX (only after arrival at destination) */}
-        {fase === "destino" && chegouDestino && (
+        {fase === "destino" && chegouDestino && isPixDireto && (
           <TouchableOpacity
             style={s.pixToggleBtn}
             onPress={() => setMostrarPix(v => !v)}
@@ -756,6 +795,12 @@ const s = StyleSheet.create({
   categoryText: { fontSize: 12, fontWeight: "800" },
   clienteNome: { flex: 1, fontSize: 14, fontWeight: "700", color: "#fff" },
   valorText: { fontSize: 20, fontWeight: "900", color: "#fff" },
+  paymentStatus: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 2, borderWidth: 1 },
+  paymentDirect: { backgroundColor: "#F59E0B16", borderColor: "#F59E0B45" },
+  paymentPending: { backgroundColor: "#8B5CF616", borderColor: "#8B5CF645" },
+  paymentPaid: { backgroundColor: "#1DB95416", borderColor: "#1DB95445" },
+  paymentStatusTitle: { color: "#fff", fontSize: 13, fontWeight: "800" },
+  paymentStatusDescription: { color: "#aaa", fontSize: 12, fontWeight: "600" },
 
   addrRow: {
     flexDirection: "row",

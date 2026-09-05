@@ -52,6 +52,9 @@ export default function EntregaAtivaScreen() {
     clienteNome: string;
     descricaoItem: string;
     tipoServico: string;
+    paymentSource: string;
+    formaPagamento: string;
+    paymentStatus: string;
   }>();
 
   const [fase, setFase] = useState<Fase>((params.fase as Fase) || "coleta");
@@ -62,6 +65,11 @@ export default function EntregaAtivaScreen() {
   const [loadingRoute, setLoadingRoute] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [mostrarPix, setMostrarPix] = useState(false);
+  const [paymentInfo, setPaymentInfo] = useState({
+    source: params.paymentSource || "direto",
+    method: params.formaPagamento || "",
+    status: params.paymentStatus || "",
+  });
   const mapRef = useRef<MapView>(null);
   const locationSub = useRef<Location.LocationSubscription | null>(null);
 
@@ -69,6 +77,28 @@ export default function EntregaAtivaScreen() {
   const tipoServico = params.tipoServico || "entrega";
   const tipoIcon = tipoServico === "delivery" ? "🛵" : "📦";
   const tipoLabel = tipoServico === "delivery" ? "Delivery" : "Entrega";
+
+  useEffect(() => {
+    const atualizarPagamento = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/motorista-app/entrega-ativa`, {
+          headers: { Authorization: `Bearer ${proUser?.token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data?.id === entregaId) {
+          setPaymentInfo({
+            source: data.paymentSource ?? data.source ?? data.payment_source ?? params.paymentSource ?? "direto",
+            method: data.forma_pagamento ?? params.formaPagamento ?? "",
+            status: data.paymentStatus ?? data.payment_status ?? data.pagamento_status ?? params.paymentStatus ?? "",
+          });
+        }
+      } catch (_) {}
+    };
+    atualizarPagamento();
+    const poll = setInterval(atualizarPagamento, 5000);
+    return () => clearInterval(poll);
+  }, [entregaId, params.formaPagamento, params.paymentSource, params.paymentStatus, proUser?.token]);
 
   // Location tracking
   useEffect(() => {
@@ -150,7 +180,10 @@ export default function EntregaAtivaScreen() {
           try {
             const res = await fetch(`${API_BASE}/motorista-app/entrega/${entregaId}/finalizar`, {
               method: "POST",
-              headers: { Authorization: `Bearer ${proUser!.token}` },
+              headers: {
+                Authorization: `Bearer ${proUser!.token}`,
+                "Idempotency-Key": `motorista-entrega-finalizar-${entregaId}`,
+              },
             });
             if (res.ok) {
               router.replace("/pro/(tabs)/inicio");
@@ -168,6 +201,20 @@ export default function EntregaAtivaScreen() {
   const faseLabel = fase === "coleta" ? "Ir buscar" : "Entregar";
   const destActual = fase === "coleta" ? coletaCoords : entregaCoords;
   const destLabel = fase === "coleta" ? params.coletaEndereco : params.entregaEndereco;
+  const paymentMethod = paymentInfo.method.toLowerCase();
+  const paymentSource = paymentInfo.source === "carteira" ? "wallet" : paymentInfo.source;
+  const paymentStatus = paymentInfo.status === "approved" ? "pago"
+    : ["pending", "in_process"].includes(paymentInfo.status) ? "pendente"
+      : paymentInfo.status;
+  const isPixDireto = paymentSource === "direto" && paymentMethod.includes("pix");
+  const pagamentoNoApp = paymentSource === "mercado_pago" || paymentSource === "wallet";
+  const pagamentoPago = pagamentoNoApp && paymentStatus === "pago";
+  const paymentLabel = pagamentoPago ? "Pago pelo app" : pagamentoNoApp ? "Pagamento pendente" : "Pagamento direto";
+  const paymentDescription = pagamentoPago
+    ? "Pagamento confirmado no app"
+    : pagamentoNoApp
+      ? `Aguardando confirmação automática pelo app${paymentMethod ? ` • ${paymentMethod.toUpperCase()}` : ""}`
+      : `${paymentMethod ? paymentMethod.toUpperCase() : "Combine com o cliente"} • receba diretamente`;
 
   const initialRegion: Region = myLocation
     ? { latitude: myLocation.latitude, longitude: myLocation.longitude, latitudeDelta: 0.02, longitudeDelta: 0.02 }
@@ -242,8 +289,13 @@ export default function EntregaAtivaScreen() {
           </View>
         </View>
 
+        <View style={[s.paymentStatus, pagamentoPago ? s.paymentPaid : pagamentoNoApp ? s.paymentPending : s.paymentDirect]}>
+          <Text style={s.paymentStatusTitle}>{pagamentoPago ? "✓ " : pagamentoNoApp ? "⌛ " : "↗ "}{paymentLabel}</Text>
+          <Text style={s.paymentStatusDescription}>{paymentDescription}</Text>
+        </View>
+
         {/* Toggle PIX (only on destino) */}
-        {fase === "destino" && (
+        {fase === "destino" && isPixDireto && (
           <TouchableOpacity
             style={s.pixToggle}
             onPress={() => setMostrarPix((v) => !v)}
@@ -362,6 +414,12 @@ const s = StyleSheet.create({
     alignItems: "center", borderWidth: 1, borderColor: "#7C3AED40",
   },
   pixToggleTxt: { color: "#A78BFA", fontSize: 13, fontWeight: "700" },
+  paymentStatus: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 2, borderWidth: 1 },
+  paymentDirect: { backgroundColor: "#F59E0B16", borderColor: "#F59E0B45" },
+  paymentPending: { backgroundColor: "#8B5CF616", borderColor: "#8B5CF645" },
+  paymentPaid: { backgroundColor: "#10B98116", borderColor: "#10B98145" },
+  paymentStatusTitle: { color: "#fff", fontSize: 13, fontWeight: "800" },
+  paymentStatusDescription: { color: "#aaa", fontSize: 12, fontWeight: "600" },
   phaseRow: { flexDirection: "row", alignItems: "center", gap: 0 },
   phaseDot: { width: 14, height: 14, borderRadius: 7 },
   phaseLine: { flex: 1, height: 3, marginHorizontal: 6 },

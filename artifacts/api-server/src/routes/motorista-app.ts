@@ -6,6 +6,8 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { uploadImageToGCS } from "../lib/uploadImage";
+import { finalizeServicePayment, settleServiceEarning } from "./payments";
+import { issueMotoristaToken, motoristaIdFromRequest } from "../lib/motoristaToken";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -127,6 +129,8 @@ async function ensureTable() {
   await db.execute(sql`ALTER TABLE motoristas_app ADD COLUMN IF NOT EXISTS pix_imagem_url TEXT`);
   await db.execute(sql`ALTER TABLE motoristas_app ADD COLUMN IF NOT EXISTS codigo_referral VARCHAR(20) UNIQUE`);
   await db.execute(sql`ALTER TABLE motoristas_app ADD COLUMN IF NOT EXISTS indicado_por VARCHAR(20)`);
+  await db.execute(sql`ALTER TABLE motoristas_app ADD COLUMN IF NOT EXISTS aceita_pagamento_direto BOOLEAN NOT NULL DEFAULT true`);
+  await db.execute(sql`ALTER TABLE motoristas_app ADD COLUMN IF NOT EXISTS aceita_pagamento_app BOOLEAN NOT NULL DEFAULT true`);
   await db.execute(sql`
     UPDATE motoristas_app SET
       codigo_referral = UPPER(LEFT(REGEXP_REPLACE(nome, '[^A-Za-z0-9]', '', 'g'), 4)) || LPAD(id::text, 4, '0')
@@ -242,12 +246,13 @@ router.post("/cadastro", async (req: Request, res: Response) => {
     const rows = await db.execute(sql`
       INSERT INTO motoristas_app (nome, telefone, senha_pin, cpf, email, cidade, estado, tipo_profissional, indicado_por)
       VALUES (${nome}, ${telefone}, ${String(pin)}, ${cpf || null}, ${email || null}, ${cidade || null}, ${estado || null}, ${tipo}, ${indicado_por || null})
-      RETURNING id, nome, telefone, status, tipo_profissional, criado_em
+       RETURNING id, nome, telefone, status, tipo_profissional, criado_em,
+                 aceita_pagamento_direto, aceita_pagamento_app
     `);
     const motorista = rows.rows[0] as any;
     const codigo_referral = gerarCodigoReferral(nome, motorista.id);
     await db.execute(sql`UPDATE motoristas_app SET codigo_referral = ${codigo_referral} WHERE id = ${motorista.id} AND codigo_referral IS NULL`);
-    return res.status(201).json({ ...motorista, codigo_referral, token: `ma_${motorista.id}_${Date.now()}` });
+    return res.status(201).json({ ...motorista, codigo_referral, token: issueMotoristaToken(motorista.id) });
   } catch (err: any) {
     if (err?.cause?.code === "23505" || err?.code === "23505") {
       return res.status(409).json({ error: "Telefone já cadastrado" });
@@ -268,7 +273,8 @@ router.post("/login", async (req: Request, res: Response) => {
              veiculo_marca, veiculo_modelo, veiculo_ano, veiculo_cor, veiculo_placa, tipo_veiculo,
              doc_cnh_status, doc_veiculo_status, doc_selfie_status,
              percentual_repasse, saldo, total_ganhos, total_corridas, avaliacao_media, criado_em,
-             status_repasse, pix_tipo, pix_chave, pix_imagem_url, codigo_referral
+              status_repasse, pix_tipo, pix_chave, pix_imagem_url, codigo_referral,
+              aceita_pagamento_direto, aceita_pagamento_app
       FROM motoristas_app WHERE telefone = ${telefone} AND senha_pin = ${String(pin)} AND ativo = true
     `);
     if (!rows.rows.length) return res.status(401).json({ error: "Telefone ou PIN incorretos" });
@@ -277,7 +283,7 @@ router.post("/login", async (req: Request, res: Response) => {
     const updated = await db.execute(sql`SELECT status_repasse FROM motoristas_app WHERE id = ${motorista.id}`);
     const statusRepasse = (updated.rows[0] as any)?.status_repasse || "ok";
     const catRows = await db.execute(`SELECT categoria_id, categoria_nome FROM motorista_categorias WHERE motorista_id = ${motorista.id} ORDER BY categoria_id`);
-    return res.json({ ...motorista, status_repasse: statusRepasse, categorias_habilitadas: catRows.rows, token: `ma_${motorista.id}_${Date.now()}` });
+    return res.json({ ...motorista, status_repasse: statusRepasse, categorias_habilitadas: catRows.rows, token: issueMotoristaToken(motorista.id) });
   } catch (_) {
     return res.status(500).json({ error: "Erro no servidor" });
   }
@@ -285,9 +291,16 @@ router.post("/login", async (req: Request, res: Response) => {
 
 // ── Middleware: extract motorista_id from token ────────────────────────────────
 function getMotoristaId(req: Request): number | null {
-  const auth = req.headers.authorization || (req.query.token as string) || "";
-  const match = auth.replace("Bearer ", "").match(/^ma_(\d+)_/);
-  return match ? parseInt(match[1]) : null;
+  return motoristaIdFromRequest(req);
+}
+async function withDriverPaymentStatus(corrida: any) {
+  const source = String(corrida.payment_source || "direto");
+  if (source === "direto") return { ...corrida, paymentSource: "direto", paymentStatus: "direto" };
+  const module = corrida.entrega_id ? "entrega" : "motorista";
+  const referenceId = corrida.entrega_id ? String(corrida.entrega_id) : (corrida.corrida_id ? String(corrida.corrida_id) : "");
+  const rows = referenceId ? await db.execute(sql`SELECT status FROM payment_transactions WHERE module = ${module} AND reference_id = ${referenceId} LIMIT 1`) : null;
+  const status = String((rows?.rows[0] as any)?.status || "pending");
+  return { ...corrida, paymentSource: source, paymentStatus: status === "approved" ? "pago" : "pendente" };
 }
 
 // ── GET /perfil ────────────────────────────────────────────────────────────────
@@ -304,7 +317,8 @@ router.get("/perfil", async (req: Request, res: Response) => {
              veiculo_marca, veiculo_modelo, veiculo_ano, veiculo_cor, veiculo_placa, tipo_veiculo,
              doc_cnh_status, doc_veiculo_status, doc_selfie_status,
              percentual_repasse, saldo, total_ganhos, total_corridas, avaliacao_media, criado_em,
-             status_repasse, pix_tipo, pix_chave, pix_imagem_url, codigo_referral
+              status_repasse, pix_tipo, pix_chave, pix_imagem_url, codigo_referral,
+              aceita_pagamento_direto, aceita_pagamento_app
       FROM motoristas_app WHERE id = ${motoristaId}
     `);
     if (!rows.rows.length) return res.status(404).json({ error: "Motorista não encontrado" });
@@ -462,7 +476,13 @@ router.put("/perfil", async (req: Request, res: Response) => {
   await ensureTable();
   const motoristaId = getMotoristaId(req);
   if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
-  const { nome, email, cidade, estado, veiculo_marca, veiculo_modelo, veiculo_ano, veiculo_cor, veiculo_placa, tipo_veiculo, selected_categoria_ids } = req.body;
+  const { nome, email, cidade, estado, veiculo_marca, veiculo_modelo, veiculo_ano, veiculo_cor, veiculo_placa, tipo_veiculo, selected_categoria_ids, aceita_pagamento_direto, aceita_pagamento_app } = req.body;
+  if (aceita_pagamento_direto !== undefined && typeof aceita_pagamento_direto !== "boolean") {
+    return res.status(400).json({ error: "aceita_pagamento_direto deve ser booleano" });
+  }
+  if (aceita_pagamento_app !== undefined && typeof aceita_pagamento_app !== "boolean") {
+    return res.status(400).json({ error: "aceita_pagamento_app deve ser booleano" });
+  }
   try {
     await db.execute(sql`
       UPDATE motoristas_app SET
@@ -476,6 +496,8 @@ router.put("/perfil", async (req: Request, res: Response) => {
         veiculo_cor = COALESCE(${veiculo_cor || null}, veiculo_cor),
         veiculo_placa = COALESCE(${veiculo_placa || null}, veiculo_placa),
         tipo_veiculo = COALESCE(${tipo_veiculo || null}, tipo_veiculo),
+        aceita_pagamento_direto = COALESCE(${aceita_pagamento_direto ?? null}, aceita_pagamento_direto),
+        aceita_pagamento_app = COALESCE(${aceita_pagamento_app ?? null}, aceita_pagamento_app),
         atualizado_em = NOW()
       WHERE id = ${motoristaId}
     `);
@@ -951,6 +973,8 @@ async function ensureCorridasTable() {
       expira_em TIMESTAMP DEFAULT NOW() + INTERVAL '30 seconds'
     )
   `));
+  await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
+  await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
 }
 
 // GET /corrida-pendente — poll for pending ride (driver app)
@@ -965,12 +989,18 @@ router.get("/corrida-pendente", async (req: Request, res: Response) => {
       WHERE status = 'aguardando' AND expira_em < NOW()
     `));
     const rows = await db.execute(sql.raw(`
-      SELECT * FROM corridas_solicitadas
-      WHERE motorista_id = ${motoristaId} AND status = 'aguardando'
+      SELECT cs.*
+      FROM corridas_solicitadas cs
+      JOIN motoristas_app ma ON ma.id = cs.motorista_id
+      WHERE cs.motorista_id = ${motoristaId} AND cs.status = 'aguardando'
+        AND (
+          (COALESCE(cs.payment_source, 'direto') = 'direto' AND ma.aceita_pagamento_direto = true)
+          OR (cs.payment_source = 'mercado_pago' AND ma.aceita_pagamento_app = true)
+        )
       ORDER BY criado_em DESC LIMIT 1
     `));
     if (!rows.rows.length) return res.json(null);
-    return res.json(rows.rows[0]);
+    return res.json(await withDriverPaymentStatus(rows.rows[0]));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1037,11 +1067,11 @@ router.get("/corrida-ativa", async (req: Request, res: Response) => {
     await ensureCorridasTable();
     const rows = await db.execute(sql.raw(`
       SELECT * FROM corridas_solicitadas
-      WHERE motorista_id = ${motoristaId} AND status IN ('aceita', 'em_andamento')
+      WHERE motorista_id = ${motoristaId} AND status IN ('aceita', 'em_andamento', 'finalizando_pagamento')
       ORDER BY criado_em DESC LIMIT 1
     `));
     if (!rows.rows.length) return res.json(null);
-    return res.json(rows.rows[0]);
+    return res.json(await withDriverPaymentStatus(rows.rows[0]));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1068,10 +1098,11 @@ router.post("/corrida/:id/chegou-destino", async (req: Request, res: Response) =
     // Update corridas table so the passenger's poll detects it
     await db.execute(sql.raw(`
       UPDATE corridas SET status = 'chegou_destino'
-      WHERE id = (
-        SELECT corrida_id FROM corridas_solicitadas
-        WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId}
-      )
+      WHERE status IN ('aceita','a_caminho','em_andamento','chegou_destino')
+        AND id = (
+          SELECT corrida_id FROM corridas_solicitadas
+          WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} AND status = 'em_andamento'
+        )
     `));
     return res.json({ ok: true });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
@@ -1083,40 +1114,80 @@ router.post("/corrida/:id/finalizar", async (req: Request, res: Response) => {
   if (!motoristaId) return res.status(401).json({ error: "unauthorized" });
   try {
     await ensureCorridasTable();
-    // Fetch the corrida to get the value
-    const corridaRes = await db.execute(sql.raw(`
-      SELECT valor_estimado, motorista_id FROM corridas_solicitadas
-      WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} AND status = 'em_andamento'
-    `));
-    if (!corridaRes.rows.length) return res.status(404).json({ error: "corrida_not_found" });
-    const corrida = corridaRes.rows[0] as any;
-    const valor = Number(corrida.valor_estimado) || 0;
-
-    // Get motorista's repasse percentage
-    const profRes = await db.execute(sql.raw(`SELECT percentual_repasse FROM motoristas_app WHERE id = ${motoristaId}`));
-    const repasse = Number((profRes.rows[0] as any)?.percentual_repasse) || 3;
-    const valorLiquido = valor * (1 - repasse / 100);
-
-    // Mark as finalized in both tables
-    await db.execute(sql.raw(`
-      UPDATE corridas_solicitadas SET status = 'finalizada'
-      WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId}
-    `));
-    await db.execute(sql.raw(`
-      UPDATE corridas SET status = 'concluida', concluido_em = NOW()
-      WHERE id = (SELECT corrida_id FROM corridas_solicitadas WHERE id = ${Number(req.params.id)})
-    `)).catch(() => {});
-
-    // Update motorista stats: increment total_corridas, total_ganhos (bruto) and saldo (líquido)
-    await db.execute(sql.raw(`
-      UPDATE motoristas_app SET
-        total_corridas = COALESCE(total_corridas, 0) + 1,
-        total_ganhos   = COALESCE(total_ganhos, 0) + ${valor},
-        saldo          = COALESCE(saldo, 0) + ${valorLiquido}
-      WHERE id = ${motoristaId}
-    `));
-
-    return res.json({ ok: true, valor, valorLiquido });
+    const reserved = await db.transaction(async tx => {
+      const ride = await tx.execute(sql`SELECT cs.status, cs.valor_estimado, cs.corrida_id, COALESCE(c.payment_source, cs.payment_source, 'direto') AS payment_source
+        FROM corridas_solicitadas cs JOIN corridas c ON c.id = cs.corrida_id JOIN motoristas_app ma ON ma.id = cs.motorista_id
+        WHERE cs.id = ${Number(req.params.id)} AND cs.motorista_id = ${motoristaId} AND ma.ativo = true AND ma.status = 'aprovado' FOR UPDATE OF cs, c, ma`);
+      const row = ride.rows[0] as any;
+      if (!row || !["em_andamento", "finalizando_pagamento", "finalizada"].includes(String(row.status))) return null;
+      if (row.status === "finalizada") return { ...row, duplicate: true };
+      if (row.payment_source !== "direto") {
+        const intent = await tx.execute(sql`SELECT id, status FROM payment_transactions WHERE module = 'motorista' AND reference_id = ${String(row.corrida_id)} FOR UPDATE`);
+        if (intent.rows.length !== 1) return { invalidIntent: "payment_intent_required" };
+        if (["rejected", "cancelled", "refunded"].includes(String((intent.rows[0] as any).status))) return { invalidIntent: "payment_rejected" };
+      }
+      if (row.status === "em_andamento") {
+        await tx.execute(sql`UPDATE corridas_solicitadas SET status = 'finalizando_pagamento' WHERE id = ${Number(req.params.id)} AND status = 'em_andamento'`);
+        await tx.execute(sql`UPDATE corridas SET status = 'finalizando_pagamento' WHERE id = ${row.corrida_id}`);
+      }
+      return { ...row, duplicate: false };
+    });
+    if (!reserved) { res.status(404).json({ error: "corrida_not_found_or_not_finalizable" }); return; }
+    if (reserved.invalidIntent) { res.status(409).json({ error: reserved.invalidIntent, paymentStatus: reserved.invalidIntent === "payment_rejected" ? "rejected" : undefined }); return; }
+    let prePayment: any = null;
+    try {
+      prePayment = reserved.payment_source === "direto" ? null : await finalizeServicePayment("motorista", String(reserved.corrida_id), req);
+      if (prePayment?.method === "card" && prePayment.status !== "approved") {
+        throw new Error(["rejected", "cancelled", "refunded"].includes(String(prePayment.status)) ? "payment_rejected" : "payment_pending");
+      }
+      if (prePayment && ["rejected", "cancelled", "refunded"].includes(String(prePayment.status))) throw new Error("payment_rejected");
+    } catch (error) {
+      await db.transaction(async tx => {
+        await tx.execute(sql`UPDATE corridas_solicitadas SET status = 'em_andamento' WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} AND status = 'finalizando_pagamento'`);
+        await tx.execute(sql`UPDATE corridas SET status = 'em_andamento' WHERE id = ${reserved.corrida_id} AND status = 'finalizando_pagamento'`);
+      });
+      if (error instanceof Error && ["payment_rejected", "payment_pending"].includes(error.message)) {
+        res.status(409).json({ error: error.message, paymentStatus: error.message === "payment_rejected" ? "rejected" : "pending" }); return;
+      }
+      throw error;
+    }
+    const finalized = await db.transaction(async tx => {
+      const state = await tx.execute(sql`SELECT c.status AS service_status, cs.status AS assignment_status
+        FROM corridas c JOIN corridas_solicitadas cs ON cs.corrida_id = c.id
+        WHERE c.id = ${reserved.corrida_id} AND cs.id = ${Number(req.params.id)} FOR UPDATE OF c, cs`);
+      const current = state.rows[0] as any;
+      if (!current) return null;
+      if (reserved.duplicate) {
+        if (current.service_status !== "concluida" || current.assignment_status !== "finalizada") return null;
+        return { ...reserved, valor: Number(reserved.valor_estimado) || 0 };
+      }
+      if (reserved.payment_source !== "direto") {
+        const paymentRows = await tx.execute(sql`SELECT method, status FROM payment_transactions
+          WHERE module = 'motorista' AND reference_id = ${String(reserved.corrida_id)} FOR UPDATE`);
+        const payment = paymentRows.rows[0] as any;
+        if (payment?.method === "card" && payment.status !== "approved") {
+          return { ...reserved, paymentBlocked: String(payment.status ?? "pending") };
+        }
+      }
+      if (current.service_status !== "finalizando_pagamento" || current.assignment_status !== "finalizando_pagamento") return null;
+      const changed = await tx.execute(sql`UPDATE corridas_solicitadas SET status = 'finalizada' WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} AND status = 'finalizando_pagamento' RETURNING valor_estimado`);
+      if (!changed.rows[0]) return null;
+      const serviceChanged = await tx.execute(sql`UPDATE corridas SET status = 'concluida', concluido_em = COALESCE(concluido_em, NOW()) WHERE id = ${reserved.corrida_id} AND status = 'finalizando_pagamento' RETURNING id`);
+      if (!serviceChanged.rows[0]) return null;
+      return { ...reserved, valor: Number((changed.rows[0] as any)?.valor_estimado ?? reserved.valor_estimado) || 0 };
+    });
+    if (finalized?.paymentBlocked) {
+      await db.transaction(async tx => {
+        await tx.execute(sql`UPDATE corridas_solicitadas SET status = 'em_andamento' WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} AND status = 'finalizando_pagamento'`);
+        await tx.execute(sql`UPDATE corridas SET status = 'em_andamento' WHERE id = ${reserved.corrida_id} AND status = 'finalizando_pagamento'`);
+      });
+      res.status(409).json({ error: finalized.paymentBlocked === "rejected" ? "payment_rejected" : "payment_pending", paymentStatus: finalized.paymentBlocked });
+      return;
+    }
+    if (!finalized) { res.status(409).json({ error: "finalization_reservation_lost" }); return; }
+    if (finalized.payment_source === "direto") await settleServiceEarning("motorista", String(finalized.corrida_id), null);
+    else if (prePayment?.status === "approved") await settleServiceEarning("motorista", String(finalized.corrida_id), Number(prePayment.id));
+    return res.json({ ok: true, valor: finalized.valor, duplicate: finalized.duplicate, paymentStatus: prePayment ? (prePayment.status === "approved" ? "pago" : "pendente") : "direto", paymentSource: finalized.payment_source, pix: prePayment?.pix ?? null });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1374,6 +1445,8 @@ async function ensureEntregasTable() {
       expira_em TIMESTAMP DEFAULT NOW() + INTERVAL '30 seconds'
     )
   `));
+  await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
+  await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
 }
 
 // POST /entrega/simular — create a test delivery for entregador/delivery (admin)
@@ -1447,19 +1520,24 @@ router.get("/entrega-pendente", async (req: Request, res: Response) => {
       WHERE status = 'aguardando' AND expira_em < NOW()
     `));
     const rows = await db.execute(sql.raw(`
-      SELECT *,
-        coleta_endereco AS origem_endereco,
-        entrega_endereco AS destino_endereco,
-        distancia_profissional_km AS distancia_motorista_km,
-        tempo_profissional_min AS tempo_motorista_min,
-        distancia_entrega_km AS distancia_viagem_km,
-        tempo_entrega_min AS tempo_viagem_min
-      FROM entregas_solicitadas
-      WHERE profissional_id = ${motoristaId} AND status = 'aguardando'
+      SELECT es.*,
+        es.coleta_endereco AS origem_endereco,
+        es.entrega_endereco AS destino_endereco,
+        es.distancia_profissional_km AS distancia_motorista_km,
+        es.tempo_profissional_min AS tempo_motorista_min,
+        es.distancia_entrega_km AS distancia_viagem_km,
+        es.tempo_entrega_min AS tempo_viagem_min
+      FROM entregas_solicitadas es
+      JOIN motoristas_app ma ON ma.id = es.profissional_id
+      WHERE es.profissional_id = ${motoristaId} AND es.status = 'aguardando'
+        AND (
+          (COALESCE(es.payment_source, 'direto') = 'direto' AND ma.aceita_pagamento_direto = true)
+          OR (es.payment_source IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true)
+        )
       ORDER BY criado_em DESC LIMIT 1
     `));
     if (!rows.rows.length) return res.json(null);
-    return res.json(rows.rows[0]);
+    return res.json(await withDriverPaymentStatus(rows.rows[0]));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1561,7 +1639,7 @@ router.get("/entrega-ativa", async (req: Request, res: Response) => {
     const rows = await db.execute(sql.raw(`
       SELECT * FROM entregas_solicitadas
       WHERE profissional_id = ${motoristaId}
-        AND status IN ('aceita', 'em_andamento')
+        AND status IN ('aceita', 'em_andamento', 'finalizando_pagamento')
         AND pedido_pdv_id IS NULL
       ORDER BY criado_em DESC LIMIT 1
     `));
@@ -1590,15 +1668,81 @@ router.post("/entrega/:id/finalizar", async (req: Request, res: Response) => {
   if (!motoristaId) return res.status(401).json({ error: "unauthorized" });
   try {
     await ensureEntregasTable();
-    await db.execute(sql.raw(`
-      UPDATE entregas_solicitadas SET status = 'finalizada'
-      WHERE id = ${Number(req.params.id)} AND profissional_id = ${motoristaId} AND status = 'em_andamento'
-    `));
-    await db.execute(sql.raw(`
-      UPDATE motoristas_app SET total_corridas = COALESCE(total_corridas, 0) + 1
-      WHERE id = ${motoristaId}
-    `));
-    return res.json({ ok: true });
+    const reserved = await db.transaction(async tx => {
+      const found = await tx.execute(sql`SELECT es.id, es.entrega_id, COALESCE(e.payment_source, es.payment_source, 'direto') AS payment_source, es.status
+        FROM entregas_solicitadas es JOIN entregas e ON e.id = es.entrega_id JOIN motoristas_app ma ON ma.id = es.profissional_id
+        WHERE es.id = ${Number(req.params.id)} AND es.profissional_id = ${motoristaId} AND ma.ativo = true AND ma.status = 'aprovado' FOR UPDATE OF es, e, ma`);
+      const row = found.rows[0] as any;
+      if (!row?.entrega_id || !["em_andamento", "finalizando_pagamento", "finalizada"].includes(String(row.status))) return null;
+      if (row.status === "finalizada") return { ...row, duplicate: true };
+      if (row.payment_source !== "direto") {
+        const intent = await tx.execute(sql`SELECT id, status FROM payment_transactions WHERE module = 'entrega' AND reference_id = ${String(row.entrega_id)} FOR UPDATE`);
+        if (intent.rows.length !== 1) return { invalidIntent: "payment_intent_required" };
+        if (["rejected", "cancelled", "refunded"].includes(String((intent.rows[0] as any).status))) return { invalidIntent: "payment_rejected" };
+      }
+      if (row.status === "em_andamento") {
+        await tx.execute(sql`UPDATE entregas_solicitadas SET status = 'finalizando_pagamento' WHERE id = ${row.id} AND status = 'em_andamento'`);
+        await tx.execute(sql`UPDATE entregas SET status = 'finalizando_pagamento' WHERE id = ${row.entrega_id}`);
+      }
+      return { ...row, duplicate: false };
+    });
+    if (!reserved) { res.status(404).json({ error: "not_found_or_not_finalizable" }); return; }
+    if (reserved.invalidIntent) { res.status(409).json({ error: reserved.invalidIntent, paymentStatus: reserved.invalidIntent === "payment_rejected" ? "rejected" : undefined }); return; }
+    const source = String(reserved.payment_source || "direto");
+    let prePayment: any = null;
+    try {
+      prePayment = source === "direto" ? null : await finalizeServicePayment("entrega", String(reserved.entrega_id), req);
+      if (prePayment?.method === "card" && prePayment.status !== "approved") {
+        throw new Error(["rejected", "cancelled", "refunded"].includes(String(prePayment.status)) ? "payment_rejected" : "payment_pending");
+      }
+      if (prePayment && ["rejected", "cancelled", "refunded"].includes(String(prePayment.status))) throw new Error("payment_rejected");
+    } catch (error) {
+      await db.transaction(async tx => {
+        await tx.execute(sql`UPDATE entregas_solicitadas SET status = 'em_andamento' WHERE id = ${Number(req.params.id)} AND profissional_id = ${motoristaId} AND status = 'finalizando_pagamento'`);
+        await tx.execute(sql`UPDATE entregas SET status = 'coletado' WHERE id = ${reserved.entrega_id} AND status = 'finalizando_pagamento'`);
+      });
+      if (error instanceof Error && ["payment_rejected", "payment_pending"].includes(error.message)) {
+        res.status(409).json({ error: error.message, paymentStatus: error.message === "payment_rejected" ? "rejected" : "pending" }); return;
+      }
+      throw error;
+    }
+    const final = await db.transaction(async tx => {
+      const state = await tx.execute(sql`SELECT e.status AS service_status, es.status AS assignment_status
+        FROM entregas e JOIN entregas_solicitadas es ON es.entrega_id = e.id
+        WHERE e.id = ${reserved.entrega_id} AND es.id = ${Number(req.params.id)} FOR UPDATE OF e, es`);
+      const current = state.rows[0] as any;
+      if (!current) return null;
+      if (reserved.duplicate) {
+        if (current.service_status !== "entregue" || current.assignment_status !== "finalizada") return null;
+        return reserved;
+      }
+      if (source !== "direto") {
+        const paymentRows = await tx.execute(sql`SELECT method, status FROM payment_transactions
+          WHERE module = 'entrega' AND reference_id = ${String(reserved.entrega_id)} FOR UPDATE`);
+        const payment = paymentRows.rows[0] as any;
+        if (payment?.method === "card" && payment.status !== "approved") {
+          return { ...reserved, paymentBlocked: String(payment.status ?? "pending") };
+        }
+      }
+      if (current.service_status !== "finalizando_pagamento" || current.assignment_status !== "finalizando_pagamento") return null;
+      const changed = await tx.execute(sql`UPDATE entregas_solicitadas SET status = 'finalizada' WHERE id = ${Number(req.params.id)} AND profissional_id = ${motoristaId} AND status = 'finalizando_pagamento' RETURNING id`);
+      if (!changed.rows[0]) return null;
+      const serviceChanged = await tx.execute(sql`UPDATE entregas SET status = 'entregue' WHERE id = ${reserved.entrega_id} AND status = 'finalizando_pagamento' RETURNING id`);
+      if (!serviceChanged.rows[0]) return null;
+      return reserved;
+    });
+    if (final?.paymentBlocked) {
+      await db.transaction(async tx => {
+        await tx.execute(sql`UPDATE entregas_solicitadas SET status = 'em_andamento' WHERE id = ${Number(req.params.id)} AND profissional_id = ${motoristaId} AND status = 'finalizando_pagamento'`);
+        await tx.execute(sql`UPDATE entregas SET status = 'coletado' WHERE id = ${reserved.entrega_id} AND status = 'finalizando_pagamento'`);
+      });
+      res.status(409).json({ error: final.paymentBlocked === "rejected" ? "payment_rejected" : "payment_pending", paymentStatus: final.paymentBlocked });
+      return;
+    }
+    if (!final) { res.status(409).json({ error: "finalization_reservation_lost" }); return; }
+    if (source === "direto") await settleServiceEarning("entrega", String(reserved.entrega_id), null);
+    else if (prePayment?.status === "approved") await settleServiceEarning("entrega", String(reserved.entrega_id), Number(prePayment.id));
+    return res.json({ ok: true, paymentSource: source, paymentStatus: prePayment ? (prePayment.status === "approved" ? "pago" : "pendente") : "direto", pix: prePayment?.pix ?? null });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1726,10 +1870,7 @@ router.delete("/admin/agendamentos/:id", requireAdmin, async (req: Request, res:
 // Driver sends their current position; sets them online and updates last ping.
 router.post("/localizacao", async (req: Request, res: Response) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!token.startsWith("ma_")) return res.status(401).json({ error: "unauthorized" });
-    const motoristaId = Number(token.split("_")[1]);
+    const motoristaId = getMotoristaId(req);
     if (!motoristaId) return res.status(401).json({ error: "invalid_token" });
 
     const { lat, lng, online } = req.body;
@@ -1790,16 +1931,38 @@ router.post("/corrida/:id/cancelar", async (req: Request, res: Response) => {
     await ensureMotivosTable();
     await ensureCorridasTable();
     const { motivo_texto } = req.body;
-    const texto = String(motivo_texto || "").replace(/'/g, "''");
-    await db.execute(sql.raw(`
-      UPDATE corridas_solicitadas
-      SET status = 'cancelada', motivo_cancelamento = '${texto}'
-      WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId}
-    `));
-    await db.execute(sql.raw(`
-      UPDATE corridas SET status = 'cancelada'
-      WHERE id = (SELECT corrida_id FROM corridas_solicitadas WHERE id = ${Number(req.params.id)})
-    `)).catch(() => {});
+    const texto = String(motivo_texto || "").slice(0, 500);
+    const cancelled = await db.transaction(async tx => {
+      const locked = await tx.execute(sql`SELECT cs.id, cs.corrida_id, cs.status AS assignment_status,
+          c.status AS service_status, COALESCE(c.payment_source, cs.payment_source, 'direto') AS payment_source
+        FROM corridas_solicitadas cs
+        JOIN corridas c ON c.id = cs.corrida_id
+        JOIN motoristas_app ma ON ma.id = cs.motorista_id
+        WHERE cs.id = ${Number(req.params.id)} AND cs.motorista_id = ${motoristaId}
+          AND ma.ativo = true AND ma.status = 'aprovado'
+        FOR UPDATE OF c, cs, ma`);
+      const row = locked.rows[0] as any;
+      if (!row) return { error: "not_found", status: 404 };
+      const assignmentAllowed = ["aguardando", "aceita", "em_andamento"].includes(String(row.assignment_status));
+      const serviceAllowed = ["aguardando", "aceita", "a_caminho", "chegou_destino", "em_andamento"].includes(String(row.service_status));
+      if (!assignmentAllowed || !serviceAllowed) return { error: "ride_not_cancellable", status: 409 };
+      if (row.payment_source !== "direto") {
+        const intents = await tx.execute(sql`SELECT id, status FROM payment_transactions
+          WHERE module = 'motorista' AND reference_id = ${String(row.corrida_id)} FOR UPDATE`);
+        if (intents.rows.length !== 1) return { error: "payment_intent_required", status: 409 };
+        const intent = intents.rows[0] as any;
+        if (String(intent.status) !== "pending") return { error: "payment_not_cancellable", status: 409 };
+        await tx.execute(sql`UPDATE payment_transactions SET status = 'cancelled',
+          metadata = COALESCE(metadata, '{}'::jsonb) - 'pix', updated_at = NOW() WHERE id = ${intent.id} AND status = 'pending'`);
+      }
+      const service = await tx.execute(sql`UPDATE corridas SET status = 'cancelada', cancelado_em = NOW()
+        WHERE id = ${row.corrida_id} AND status IN ('aguardando','aceita','a_caminho','chegou_destino','em_andamento') RETURNING id`);
+      if (!service.rows[0]) return { error: "ride_not_cancellable", status: 409 };
+      await tx.execute(sql`UPDATE corridas_solicitadas SET status = 'cancelada', motivo_cancelamento = ${texto}
+        WHERE id = ${row.id} AND status IN ('aguardando','aceita','em_andamento')`);
+      return { ok: true };
+    });
+    if ("error" in cancelled) return res.status(cancelled.status ?? 409).json({ error: cancelled.error });
     return res.json({ ok: true });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
@@ -1876,10 +2039,7 @@ router.delete("/caronas/:id", async (req: Request, res: Response) => {
 // Driver toggles online/offline without sending location.
 router.post("/status-online", async (req: Request, res: Response) => {
   try {
-    const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!token.startsWith("ma_")) return res.status(401).json({ error: "unauthorized" });
-    const motoristaId = Number(token.split("_")[1]);
+    const motoristaId = getMotoristaId(req);
     if (!motoristaId) return res.status(401).json({ error: "invalid_token" });
 
     const { online } = req.body;
@@ -1897,6 +2057,10 @@ export async function dispatchEntregaToEntregadores(entrega: any): Promise<{ dis
     const moto = await db.execute(sql.raw(`
       SELECT id, fcm_token, lat, lng FROM motoristas_app
       WHERE tipo_profissional IN ('entregador','delivery') AND ativo = true
+        AND (
+          (COALESCE('${esc(String(entrega.payment_source || "direto"))}', 'direto') = 'direto' AND aceita_pagamento_direto = true)
+          OR ('${esc(String(entrega.payment_source || "direto"))}' IN ('mercado_pago', 'wallet') AND aceita_pagamento_app = true)
+        )
     `));
     const motoristas = moto.rows as any[];
     if (!motoristas.length) return { dispatched: 0 };
@@ -1937,14 +2101,14 @@ export async function dispatchEntregaToEntregadores(entrega: any): Promise<{ dis
            distancia_profissional_km, tempo_profissional_min,
            distancia_entrega_km, tempo_entrega_min,
            cliente_nome, cliente_rating, cliente_avaliacoes, descricao_item,
-           entrega_id, expira_em)
+           entrega_id, forma_pagamento, payment_source, expira_em)
         VALUES (
           ${Number(m.id)}, 'entrega', '${escTxt(cat)}', ${valor},
           '${escTxt(entrega.endereco_coleta)}', '${escTxt(entrega.endereco_entrega)}',
           ${distMot}, ${tempoMot},
           ${km}, ${tempoEntrega},
           '${escTxt(entrega.remetente_nome)}', 5.0, 0, '${escTxt(entrega.descricao_pacote || "")}',
-          ${Number(entrega.id)}, NOW() + INTERVAL '60 seconds'
+          ${Number(entrega.id)}, '${escTxt(entrega.forma_pagamento || (entrega.payment_source === "wallet" ? "wallet" : "pix"))}', '${escTxt(entrega.payment_source || "direto")}', NOW() + INTERVAL '60 seconds'
         )
       `));
 

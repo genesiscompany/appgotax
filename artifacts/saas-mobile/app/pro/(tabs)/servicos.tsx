@@ -48,6 +48,13 @@ type Ativa = {
   entrega_endereco?: string;
   descricao_item?: string;
   tipo_servico?: string;
+  forma_pagamento?: string | null;
+  source?: string | null;
+  paymentSource?: string | null;
+  payment_source?: string | null;
+  paymentStatus?: string | null;
+  payment_status?: string | null;
+  pagamento_status?: string | null;
 };
 
 type HistItem = {
@@ -146,6 +153,9 @@ export default function ProServicos() {
           clienteNome: ativa.cliente_nome ?? "Cliente",
           descricaoItem: ativa.descricao_item ?? "",
           tipoServico: ativa.tipo_servico ?? tipo,
+          paymentSource: ativa.paymentSource ?? ativa.source ?? ativa.payment_source ?? "direto",
+          formaPagamento: ativa.forma_pagamento ?? "",
+          paymentStatus: ativa.paymentStatus ?? ativa.payment_status ?? ativa.pagamento_status ?? "",
         },
       });
     } else {
@@ -160,6 +170,9 @@ export default function ProServicos() {
           categoriaName: ativa.categoria_nome ?? "GoTaxi",
           valorEstimado: String(ativa.valor_estimado),
           clienteNome: ativa.cliente_nome ?? "Cliente",
+          paymentSource: ativa.paymentSource ?? ativa.source ?? ativa.payment_source ?? "direto",
+          formaPagamento: ativa.forma_pagamento ?? "",
+          paymentStatus: ativa.paymentStatus ?? ativa.payment_status ?? ativa.pagamento_status ?? "",
         },
       });
     }
@@ -169,6 +182,19 @@ export default function ProServicos() {
 
   const origemAtiva = isEntregador ? ativa?.coleta_endereco : ativa?.origem_endereco;
   const destinoAtiva = isEntregador ? ativa?.entrega_endereco : ativa?.destino_endereco;
+  const rawPaymentSourceAtivo = ativa?.paymentSource ?? ativa?.source ?? ativa?.payment_source;
+  const paymentSourceAtivo = rawPaymentSourceAtivo === "carteira" ? "wallet" : rawPaymentSourceAtivo;
+  const rawPaymentStatusAtivo = ativa?.paymentStatus ?? ativa?.payment_status ?? ativa?.pagamento_status ?? "";
+  const paymentStatusAtivo = rawPaymentStatusAtivo === "approved" ? "pago"
+    : ["pending", "in_process"].includes(rawPaymentStatusAtivo)
+      ? "pendente"
+      : ativa?.paymentStatus ?? ativa?.payment_status ?? ativa?.pagamento_status;
+  const pagamentoNoApp = paymentSourceAtivo === "mercado_pago" || paymentSourceAtivo === "wallet";
+  const pagamentoAtivo = pagamentoNoApp
+    ? paymentStatusAtivo === "pago"
+      ? "Pago pelo app"
+      : `Pagamento pendente${ativa?.forma_pagamento ? ` · ${ativa.forma_pagamento.replace(/_/g, " ")}` : ""}`
+    : `Pagamento direto${ativa?.forma_pagamento ? ` · ${ativa.forma_pagamento.replace(/_/g, " ")}` : ""}`;
 
   return (
     <SafeAreaView style={styles.root}>
@@ -198,6 +224,9 @@ export default function ProServicos() {
                   {fmtBRL(ativa.valor_estimado)}
                 </Text>
               </View>
+              <Text style={[styles.pagamentoAtivo, pagamentoNoApp && styles.pagamentoApp]}>
+                {pagamentoAtivo}
+              </Text>
 
               {ativa.cliente_nome && (
                 <View style={styles.clienteRow}>
@@ -352,6 +381,8 @@ const styles = StyleSheet.create({
   histTop: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   histData: { fontSize: 12, color: "#555", marginBottom: 2 },
   histCliente: { fontSize: 14, fontWeight: "700", color: "#CCC" },
+  pagamentoAtivo: { alignSelf: "flex-start", color: "#FCD34D", backgroundColor: "#3B2F0E", borderRadius: 7, paddingHorizontal: 8, paddingVertical: 4, fontSize: 11, fontWeight: "700", textTransform: "capitalize" },
+  pagamentoApp: { color: "#86EFAC", backgroundColor: "#123322" },
   histValor: { fontSize: 18, fontWeight: "900" },
   histRota: { gap: 3 },
   histAddr: { fontSize: 12, color: "#444" },

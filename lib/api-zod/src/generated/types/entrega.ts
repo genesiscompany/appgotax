@@ -5,6 +5,8 @@
  * SaaS Multi-Empresas API
  * OpenAPI spec version: 0.1.0
  */
+import type { EntregaPaymentSource } from "./entregaPaymentSource";
+import type { EntregaPaymentStatus } from "./entregaPaymentStatus";
 import type { EntregaStatus } from "./entregaStatus";
 
 export interface Entrega {
@@ -17,5 +19,7 @@ export interface Entrega {
   status: EntregaStatus;
   entregadorNome?: string | null;
   valor: number;
+  paymentSource?: EntregaPaymentSource;
+  paymentStatus?: EntregaPaymentStatus;
   criadoEm: Date;
 }
