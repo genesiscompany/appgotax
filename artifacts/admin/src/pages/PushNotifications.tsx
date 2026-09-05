@@ -4,7 +4,7 @@ import { useAuth } from "@/lib/auth";
 const API = import.meta.env.BASE_URL.replace(/\/$/, "").replace("/admin", "") + "/api/admin";
 
 const MODULOS = [
-  { id: "todos", label: "Todos os usuários", emoji: "📣", cor: "bg-gray-100 text-gray-700 border-gray-200" },
+  { id: "todos", label: "Todos os dispositivos", emoji: "📣", cor: "bg-gray-100 text-gray-700 border-gray-200" },
   { id: "motorista", label: "Viagens", emoji: "🚗", cor: "bg-orange-50 text-orange-700 border-orange-200" },
   { id: "food", label: "Alimentação", emoji: "🍕", cor: "bg-purple-50 text-purple-700 border-purple-200" },
   { id: "entrega", label: "Entregas", emoji: "📦", cor: "bg-yellow-50 text-yellow-700 border-yellow-200" },
@@ -84,7 +84,7 @@ export default function PushNotifications() {
     <div className="max-w-4xl mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Push Notifications</h1>
-        <p className="text-muted-foreground mt-1">Envie notificações para todos os clientes ou por módulo específico.</p>
+        <p className="text-muted-foreground mt-1">Envie notificações aos dispositivos que autorizaram notificações no aplicativo.</p>
       </div>
 
       {/* Stats */}

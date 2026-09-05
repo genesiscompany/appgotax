@@ -11,12 +11,16 @@ const API_BASE = (process.env.EXPO_PUBLIC_DOMAIN
   ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`
   : "http://localhost:8080/api");
 
-const EXPO_PROJECT_ID = "4109488b-2deb-4686-afb7-5c3e46b57319";
+const EXPO_PROJECT_ID = String(Constants.expoConfig?.extra?.eas?.projectId || "");
 
 async function getExpoPushToken(): Promise<string | null> {
   try {
     if (Platform.OS === "web") return null;
     if (IS_EXPO_GO) return null;
+    if (!EXPO_PROJECT_ID) {
+      console.warn("usePushNotifications: EAS projectId ausente");
+      return null;
+    }
     const Notifications = await import("expo-notifications");
     Notifications.setNotificationHandler({
       handleNotification: async () => ({

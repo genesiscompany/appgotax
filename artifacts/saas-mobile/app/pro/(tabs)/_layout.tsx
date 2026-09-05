@@ -43,7 +43,7 @@ function TabIcon({ icon, label, color }: { icon: string; label: string; color: s
   );
 }
 
-const EXPO_PROJECT_ID = "4109488b-2deb-4686-afb7-5c3e46b57319";
+const EXPO_PROJECT_ID = String(Constants.expoConfig?.extra?.eas?.projectId || "");
 
 async function registerForPushNotifications(): Promise<string | null> {
   if (!Notifications) return null;
@@ -81,6 +81,10 @@ async function registerForPushNotifications(): Promise<string | null> {
 async function registerExpoBroadcastToken(proToken: string): Promise<void> {
   if (!Notifications || Platform.OS === "web") return;
   try {
+    if (!EXPO_PROJECT_ID) {
+      console.log("Expo broadcast token error: EAS projectId ausente");
+      return;
+    }
     const expoToken = await Notifications.getExpoPushTokenAsync({ projectId: EXPO_PROJECT_ID });
     if (!expoToken?.data) return;
     await fetch(`${API_BASE}/cliente/push-token`, {
@@ -219,6 +223,9 @@ export default function ProTabsLayout() {
             clienteNome: pendente?.cliente_nome ?? "Cliente",
             descricaoItem: pendente?.descricao_item ?? "",
             tipoServico: pendente?.tipo_servico ?? "entrega",
+            paymentSource: pendente?.paymentSource ?? pendente?.source ?? pendente?.payment_source ?? "direto",
+            formaPagamento: pendente?.forma_pagamento ?? "",
+            paymentStatus: pendente?.paymentStatus ?? pendente?.payment_status ?? pendente?.pagamento_status ?? "",
           },
         });
       } else {
@@ -233,6 +240,9 @@ export default function ProTabsLayout() {
             categoriaName: pendente?.categoria_nome ?? "",
             valorEstimado: String(pendente?.valor_estimado ?? "0"),
             clienteNome: pendente?.cliente_nome ?? "Cliente",
+            paymentSource: pendente?.paymentSource ?? pendente?.source ?? pendente?.payment_source ?? "direto",
+            formaPagamento: pendente?.forma_pagamento ?? "",
+            paymentStatus: pendente?.paymentStatus ?? pendente?.payment_status ?? pendente?.pagamento_status ?? "",
           },
         });
       }
