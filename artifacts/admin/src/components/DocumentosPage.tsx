@@ -306,6 +306,10 @@ export default function DocumentosPage({
                                   </a>
                                   <span className="text-xs text-green-600">· Enviado</span>
                                 </div>
+                              ) : isLegacyMarker && docStatus === "aprovado" ? (
+                                <p className="text-xs text-green-700 font-medium">
+                                  Aprovado anteriormente
+                                </p>
                               ) : isLegacyMarker ? (
                                 <p className="text-xs text-amber-700 font-medium">
                                   Arquivo antigo sem endereço — solicite o reenvio
