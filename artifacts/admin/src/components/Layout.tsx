@@ -159,7 +159,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         {/* Brand */}
         <div className="flex items-center gap-3 px-4 h-16 border-b border-sidebar-border shrink-0">
           <div className="flex-1 min-w-0">
-            <img src="/admin/logo.png" alt="Go Taxi" className="h-8 object-contain object-left" />
+            <img src="/logo.png" alt="Go Taxi" className="h-8 object-contain object-left" />
             <p className="text-[10px] text-primary font-semibold uppercase tracking-wider mt-0.5">Super Admin</p>
           </div>
         </div>
