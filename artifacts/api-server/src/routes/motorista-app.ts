@@ -532,14 +532,17 @@ router.post("/documentos", async (req: Request, res: Response) => {
   await ensureTable();
   const motoristaId = getMotoristaId(req);
   if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
-  const { tipo } = req.body;
+  const { tipo, url } = req.body;
   const tipos: Record<string, string> = { cnh: "doc_cnh", veiculo: "doc_veiculo", selfie: "doc_selfie" };
   const statusCols: Record<string, string> = { cnh: "doc_cnh_status", veiculo: "doc_veiculo_status", selfie: "doc_selfie_status" };
   if (!tipos[tipo]) return res.status(400).json({ error: "tipo deve ser: cnh, veiculo ou selfie" });
+  if (typeof url !== "string" || !url.startsWith("/api/images/docs/")) {
+    return res.status(400).json({ error: "url_documento_invalida", message: "Envie o arquivo antes de registrar o documento" });
+  }
   try {
     await db.execute(sql.raw(`
       UPDATE motoristas_app
-      SET ${tipos[tipo]} = 'enviado', ${statusCols[tipo]} = 'em_analise', atualizado_em = NOW()
+      SET ${tipos[tipo]} = '${esc(url)}', ${statusCols[tipo]} = 'em_analise', atualizado_em = NOW()
       WHERE id = ${motoristaId}
     `));
     await db.execute(sql`
@@ -552,7 +555,8 @@ router.post("/documentos", async (req: Request, res: Response) => {
       SELECT doc_cnh_status, doc_veiculo_status, doc_selfie_status, status FROM motoristas_app WHERE id = ${motoristaId}
     `);
     return res.json({ ok: true, documentos: rows.rows[0] });
-  } catch (_) {
+  } catch (err) {
+    console.error("POST /documentos error:", err);
     return res.status(500).json({ error: "Erro ao enviar documento" });
   }
 });

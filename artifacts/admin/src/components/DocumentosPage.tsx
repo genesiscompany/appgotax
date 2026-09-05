@@ -278,6 +278,7 @@ export default function DocumentosPage({
                         {applicableDocs.map(df => {
                           const docStatus = getDocStatus(p, df.tipo);
                           const docUrl = getDocUrl(p, df.tipo);
+                           const isLegacyMarker = docUrl === "enviado";
                           const dConf = DOC_STATUS[docStatus] || DOC_STATUS.pendente;
                           const updKey = `${p.id}_${df.tipo}`;
                           const isUpdating = updating === updKey;
@@ -297,7 +298,7 @@ export default function DocumentosPage({
                               </div>
 
                               {/* Doc URL preview */}
-                              {docUrl ? (
+                              {docUrl && !isLegacyMarker ? (
                                 <div className="flex items-center gap-2">
                                   <a href={docUrl} target="_blank" rel="noreferrer"
                                     className="flex items-center gap-1.5 text-xs text-primary hover:underline font-medium">
@@ -305,6 +306,10 @@ export default function DocumentosPage({
                                   </a>
                                   <span className="text-xs text-green-600">· Enviado</span>
                                 </div>
+                              ) : isLegacyMarker ? (
+                                <p className="text-xs text-amber-700 font-medium">
+                                  Arquivo antigo sem endereço — solicite o reenvio
+                                </p>
                               ) : (
                                 <p className="text-xs text-muted-foreground italic">Documento não enviado ainda</p>
                               )}

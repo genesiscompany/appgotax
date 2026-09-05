@@ -112,45 +112,40 @@ export default function Pendente() {
 
       const asset = result.assets[0];
 
-      // Upload the file to server
-      let fileUrl = asset.uri;
-      try {
-        const formData = new FormData();
-        if (Platform.OS === "web") {
-          const blobRes = await globalThis.fetch(asset.uri);
-          const blob = await blobRes.blob();
-          formData.append("file", blob, `${tipo}.jpg`);
-        } else {
-          formData.append("file", {
-            uri: asset.uri,
-            name: `${tipo}.jpg`,
-            type: asset.mimeType || "image/jpeg",
-          } as any);
-        }
-
-        const uploadRes = await globalThis.fetch(`${API_BASE}/motorista-app/upload`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${proUser!.token}` },
-          body: formData,
-        });
-
-        if (uploadRes.ok) {
-          const uploadData = await uploadRes.json();
-          fileUrl = uploadData.url || fileUrl;
-        }
-      } catch {
-        // If upload fails, continue with local URI (graceful degradation)
+      // Upload the file before registering the document. A local device URI
+      // must never be persisted because the Admin cannot access it.
+      const formData = new FormData();
+      if (Platform.OS === "web") {
+        const blobRes = await globalThis.fetch(asset.uri);
+        const blob = await blobRes.blob();
+        formData.append("file", blob, `${tipo}.jpg`);
+      } else {
+        formData.append("file", {
+          uri: asset.uri,
+          name: `${tipo}.jpg`,
+          type: asset.mimeType || "image/jpeg",
+        } as any);
       }
 
+      const uploadRes = await globalThis.fetch(`${API_BASE}/motorista-app/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${proUser!.token}` },
+        body: formData,
+      });
+      if (!uploadRes.ok) throw new Error("Falha no upload do documento");
+      const uploadData = await uploadRes.json();
+      if (!uploadData.url) throw new Error("Upload sem URL do documento");
+
       // Register document URL
-      await globalThis.fetch(`${API_BASE}/motorista-app/documentos`, {
+      const registerRes = await globalThis.fetch(`${API_BASE}/motorista-app/documentos`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${proUser!.token}`,
         },
-        body: JSON.stringify({ tipo, url: fileUrl }),
+        body: JSON.stringify({ tipo, url: uploadData.url }),
       });
+      if (!registerRes.ok) throw new Error("Falha ao registrar o documento");
 
       await refreshPerfil();
       Alert.alert("✅ Documento enviado!", "Nossa equipe irá analisar em breve.");
