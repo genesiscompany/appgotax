@@ -63,6 +63,20 @@ export type ServicePaymentStatus = {
   };
 };
 
+export class PaymentApiError extends Error {
+  code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "PaymentApiError";
+    this.code = code;
+  }
+}
+
+export function isPaymentUnauthorized(error: unknown): boolean {
+  return error instanceof PaymentApiError && error.code === "unauthorized";
+}
+
 const getApiBase = () => {
   return process.env.EXPO_PUBLIC_DOMAIN
     ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`
@@ -138,7 +152,8 @@ async function paymentApiError(res: Response, fallback: string): Promise<Error> 
     saved_card_not_supported_for_marketplace_seller: "Este cartão salvo não pode ser usado com a conta do motorista. Cadastre um novo cartão para este pagamento.",
     marketplace_card_token_incompatible: "O Mercado Pago não aceitou este cartão para a conta do motorista. Gere um novo token e tente novamente.",
   };
-  return new Error(messages[data.error] || data.message || fallback);
+  const code = typeof data.error === "string" ? data.error : `http_${res.status}`;
+  return new PaymentApiError(code, messages[code] || data.message || fallback);
 }
 
 export async function getSavedCardConfig(token: string): Promise<SavedCardConfig> {

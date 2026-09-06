@@ -6,7 +6,7 @@ import { router } from "expo-router";
 import * as Linking from "expo-linking";
 import Colors from "@/constants/colors";
 import { useCustomerAuth } from "@/context/CustomerAuthContext";
-import { getWallet, getWalletLedger, topupWallet, type WalletData, type WalletLedgerItem } from "@/api/payments";
+import { getWallet, getWalletLedger, isPaymentUnauthorized, topupWallet, type WalletData, type WalletLedgerItem } from "@/api/payments";
 import ClienteBottomNav from "@/components/ClienteBottomNav";
 import { LinearGradient } from "expo-linear-gradient";
 
@@ -20,13 +20,22 @@ export default function CarteiraScreen() {
   const isDark = colorScheme === "dark";
   const colors = isDark ? Colors.dark : Colors.light;
   
-  const { customer, isLoggedIn } = useCustomerAuth();
+  const { customer, isLoggedIn, logout } = useCustomerAuth();
   
   const [wallet, setWallet] = useState<WalletData | null>(null);
   const [ledger, setLedger] = useState<WalletLedgerItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [topupAmount, setTopupAmount] = useState("");
   const [isToppingUp, setIsToppingUp] = useState(false);
+
+  const encerrarSessaoExpirada = async () => {
+    await logout();
+    Alert.alert(
+      "Entre novamente",
+      "Sua sessão antiga precisa ser renovada para usar a Carteira.",
+      [{ text: "Entrar", onPress: () => router.replace("/cliente" as any) }],
+    );
+  };
 
   const loadData = async () => {
     if (!customer?.token) {
@@ -42,7 +51,7 @@ export default function CarteiraScreen() {
       setWallet(w);
       setLedger(l);
     } catch (e) {
-      // ignore
+      if (isPaymentUnauthorized(e)) await encerrarSessaoExpirada();
     } finally {
       setLoading(false);
     }
@@ -74,6 +83,10 @@ export default function CarteiraScreen() {
       // reset field after flow
       setTopupAmount("");
     } catch (e: any) {
+      if (isPaymentUnauthorized(e)) {
+        await encerrarSessaoExpirada();
+        return;
+      }
       Alert.alert("Erro", e.message || "Não foi possível iniciar a recarga.");
     } finally {
       setIsToppingUp(false);

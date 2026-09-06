@@ -520,10 +520,25 @@ export default function ProPerfil() {
     try {
       const res = await fetch(`${API_BASE}/motorista-app/mercado-pago/connect`, { method: "POST", headers: { Authorization: `Bearer ${proUser.token}` } });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.authorizeUrl) throw new Error(data.error);
+      if (res.status === 401) {
+        router.replace("/pro/login" as any);
+        await logout();
+        Alert.alert("Entre novamente", "Sua sessão antiga precisa ser renovada antes de conectar o Mercado Pago.");
+        return;
+      }
+      if (!res.ok || !data.authorizeUrl) {
+        const messages: Record<string, string> = {
+          mercado_pago_oauth_not_configured: "A conexão de contas ainda não foi configurada na API. Verifique o Client ID e o Client Secret OAuth do Mercado Pago.",
+          mercado_pago_oauth_start_failed: "A API não conseguiu gerar a autorização. Verifique o domínio de retorno e a configuração OAuth do Mercado Pago.",
+        };
+        throw new Error(messages[data.error] || data.message || "Não foi possível iniciar a conexão.");
+      }
       await Linking.openURL(data.authorizeUrl);
-    } catch { Alert.alert("Mercado Pago", "Não foi possível iniciar a conexão. Tente novamente mais tarde."); }
-    setMpLoading(false);
+    } catch (error) {
+      Alert.alert("Mercado Pago", error instanceof Error ? error.message : "Não foi possível iniciar a conexão. Tente novamente mais tarde.");
+    } finally {
+      setMpLoading(false);
+    }
   };
   const desconectarMercadoPago = () => Alert.alert("Desconectar Mercado Pago", "Pagamentos pelo app serão desativados.", [
     { text: "Cancelar", style: "cancel" },

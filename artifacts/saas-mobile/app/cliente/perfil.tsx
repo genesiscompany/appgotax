@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, Pressable, TextInput,
   useColorScheme, ScrollView, Alert, ActivityIndicator, Linking, Modal, Image,
@@ -13,7 +13,7 @@ import { useCustomerAuth, type FormaPagamento } from "@/context/CustomerAuthCont
 import ClienteBottomNav from "@/components/ClienteBottomNav";
 import MercadoPagoCardTokenizer from "@/components/MercadoPagoCardTokenizer";
 import {
-  deleteSavedCard, getSavedCard, getSavedCardConfig, saveCard,
+  deleteSavedCard, getSavedCard, getSavedCardConfig, isPaymentUnauthorized, saveCard,
   type SavedCard, type SavedCardConfig,
 } from "@/api/payments";
 
@@ -121,6 +121,18 @@ export default function PerfilScreen() {
   const [savedCardConfig, setSavedCardConfig] = useState<SavedCardConfig | null>(null);
   const [cardTokenizerVisible, setCardTokenizerVisible] = useState(false);
   const [cardLoading, setCardLoading] = useState(false);
+  const sessionAlertShown = useRef(false);
+
+  const encerrarSessaoExpirada = async () => {
+    if (sessionAlertShown.current) return;
+    sessionAlertShown.current = true;
+    await logout();
+    Alert.alert(
+      "Entre novamente",
+      "Sua sessão antiga precisa ser renovada para usar Cartão e Carteira.",
+      [{ text: "Entrar", onPress: () => router.replace("/cliente" as any) }],
+    );
+  };
 
   const carregarCartao = async () => {
     if (!customer?.token) return;
@@ -128,13 +140,21 @@ export default function PerfilScreen() {
     try {
       const card = await getSavedCard(customer.token);
       setSavedCard(card);
-    } catch {
+    } catch (error) {
+      if (isPaymentUnauthorized(error)) {
+        await encerrarSessaoExpirada();
+        return;
+      }
       setSavedCard(null);
     }
     try {
       const config = await getSavedCardConfig(customer.token);
       setSavedCardConfig(config);
-    } catch {
+    } catch (error) {
+      if (isPaymentUnauthorized(error)) {
+        await encerrarSessaoExpirada();
+        return;
+      }
       setSavedCardConfig(null);
     } finally {
       setCardLoading(false);
@@ -209,6 +229,10 @@ export default function PerfilScreen() {
         setPagamentoModal(false);
         setCardTokenizerVisible(true);
       } catch (error) {
+        if (isPaymentUnauthorized(error)) {
+          await encerrarSessaoExpirada();
+          return;
+        }
         Alert.alert("Cartão indisponível", error instanceof Error ? error.message : "Não foi possível abrir o cadastro seguro.");
       } finally {
         setPagamentoLoading(false);
@@ -232,6 +256,10 @@ export default function PerfilScreen() {
       setCardTokenizerVisible(false);
       Alert.alert("Cartão salvo", `Final ${card.lastFour}. Agora ele pode ser usado sem preencher os dados a cada corrida.`);
     } catch (error) {
+      if (isPaymentUnauthorized(error)) {
+        await encerrarSessaoExpirada();
+        return;
+      }
       Alert.alert("Não foi possível salvar", error instanceof Error ? error.message : "Confira os dados e tente novamente.");
       setCardTokenizerVisible(false);
     } finally {
@@ -253,6 +281,10 @@ export default function PerfilScreen() {
             setSavedCard(null);
             if (customer.formaPagamento === "cartao") await updateProfile({ formaPagamento: null });
           } catch (error) {
+            if (isPaymentUnauthorized(error)) {
+              await encerrarSessaoExpirada();
+              return;
+            }
             Alert.alert("Erro", error instanceof Error ? error.message : "Não foi possível remover o cartão.");
           } finally {
             setCardLoading(false);

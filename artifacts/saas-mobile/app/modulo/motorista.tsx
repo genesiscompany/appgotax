@@ -7,6 +7,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
+import * as ImagePicker from "expo-image-picker";
 import Colors from "@/constants/colors";
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api` : "/api";
@@ -169,22 +170,97 @@ function StatusScreen({ motorista, token, onRefresh, isDark, colors, insets, onL
   const statusConf = STATUS_CONF[motorista.status] || STATUS_CONF.pendente;
   const statusCol = statusConf.color;
 
-  const handleEnviarDoc = async (tipo: string, key: string) => {
+  const handleEnviarDoc = (tipo: string, _key: string) => {
+    if (Platform.OS === "web") {
+      void pickAndUpload(tipo, "library");
+      return;
+    }
+    Alert.alert(
+      "Enviar documento",
+      "Escolha como deseja enviar:",
+      [
+        { text: "Câmera", onPress: () => void pickAndUpload(tipo, "camera") },
+        { text: "Galeria de fotos", onPress: () => void pickAndUpload(tipo, "library") },
+        { text: "Cancelar", style: "cancel" },
+      ],
+    );
+  };
+
+  const pickAndUpload = async (tipo: string, source: "camera" | "library") => {
     setLoading(tipo);
     try {
-      const res = await fetch(`${API_BASE}/motorista-app/documentos`, {
+      let result: ImagePicker.ImagePickerResult;
+      if (source === "camera") {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert("Permissão necessária", "Permita o acesso à câmera para fotografar o documento.");
+          return;
+        }
+        result = await ImagePicker.launchCameraAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.75,
+        });
+      } else {
+        if (Platform.OS !== "web") {
+          const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (!permission.granted) {
+            Alert.alert("Permissão necessária", "Permita o acesso à galeria para selecionar o documento.");
+            return;
+          }
+        }
+        result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.75,
+        });
+      }
+
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      const formData = new FormData();
+      if (Platform.OS === "web") {
+        const blobResponse = await globalThis.fetch(asset.uri);
+        const blob = await blobResponse.blob();
+        formData.append("file", blob, `${tipo}.jpg`);
+      } else {
+        formData.append("file", {
+          uri: asset.uri,
+          name: `${tipo}.jpg`,
+          type: asset.mimeType || "image/jpeg",
+        } as any);
+      }
+
+      const uploadRes = await globalThis.fetch(`${API_BASE}/motorista-app/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (!uploadRes.ok) {
+        const error = await uploadRes.json().catch(() => null);
+        throw new Error(error?.error || "Falha no upload do documento");
+      }
+      const uploadData = await uploadRes.json();
+      if (!uploadData.url) throw new Error("O servidor não retornou a URL do documento");
+
+      const registerRes = await globalThis.fetch(`${API_BASE}/motorista-app/documentos`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ tipo }),
+        body: JSON.stringify({ tipo, url: uploadData.url }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setDocs((prev: any) => ({ ...prev, ...data.documentos }));
-        Alert.alert("Enviado!", "Documento marcado como enviado. Aguarde análise.");
-        onRefresh();
+      if (!registerRes.ok) {
+        const error = await registerRes.json().catch(() => null);
+        throw new Error(error?.error || "Falha ao registrar o documento");
       }
-    } catch (_) { Alert.alert("Erro", "Não foi possível enviar o documento"); }
-    setLoading(null);
+
+      const data = await registerRes.json();
+      setDocs((prev: any) => ({ ...prev, ...data.documentos }));
+      await onRefresh();
+      Alert.alert("Documento enviado!", "Nossa equipe irá analisar em breve.");
+    } catch (error) {
+      console.error("[document-upload]", error);
+      Alert.alert("Erro", "Não foi possível enviar o documento. Tente novamente.");
+    } finally {
+      setLoading(null);
+    }
   };
 
   const docStatusConf: Record<string, { label: string; color: string; icon: string }> = {
