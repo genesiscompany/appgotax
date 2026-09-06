@@ -162,8 +162,8 @@ export default function PerfilScreen() {
   };
 
   useEffect(() => {
-    if (customer?.token) void carregarCartao();
-  }, [customer?.token]);
+    if (pagamentoModal && customer?.token) void carregarCartao();
+  }, [pagamentoModal, customer?.token]);
 
   const abrirEdicao = () => {
     if (!customer) return;
