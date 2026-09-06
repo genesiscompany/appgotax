@@ -49,6 +49,7 @@ export type CheckoutResponse = {
   transactionId?: number;
   balanceCents?: number;
   message?: string;
+  sandbox?: boolean;
 };
 
 export type ServicePaymentStatus = {
@@ -116,7 +117,7 @@ export async function topupWallet(token: string, amountCents: number): Promise<C
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ amountCents })
   });
-  if (!res.ok) throw new Error("Failed to topup wallet");
+  if (!res.ok) throw await paymentApiError(res, "Não foi possível iniciar a recarga.");
   return res.json();
 }
 
@@ -124,6 +125,8 @@ async function paymentApiError(res: Response, fallback: string): Promise<Error> 
   const data = await res.json().catch(() => ({}));
   const messages: Record<string, string> = {
     mercado_pago_not_configured: "O Mercado Pago ainda não está disponível.",
+    mercado_pago_unavailable: "O Mercado Pago não conseguiu iniciar esta operação. Confira a configuração no Super Admin.",
+    unauthorized: "Sua sessão expirou. Entre novamente na conta.",
     invalid_card_token: "Os dados do cartão não puderam ser validados.",
     mercado_pago_card_unavailable: "O Mercado Pago não conseguiu salvar o cartão. Confira os dados e tente novamente.",
     customer_email_required: "Adicione um e-mail válido ao seu cadastro antes de salvar o cartão.",

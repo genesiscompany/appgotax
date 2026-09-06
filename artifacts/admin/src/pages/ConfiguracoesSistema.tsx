@@ -60,6 +60,7 @@ export default function ConfiguracoesSistema() {
   const [mpCredentials, setMpCredentials] = useState({
     publicKey: "",
     accessToken: "",
+    environment: "production" as "production" | "sandbox",
     enabled: false,
     configured: false,
   });
@@ -96,6 +97,7 @@ export default function ConfiguracoesSistema() {
           setMpCredentials({
             publicKey: config.publicKey || "",
             accessToken: "",
+            environment: config.environment === "sandbox" ? "sandbox" : "production",
             enabled: !!config.enabled,
             configured: !!config.configured,
           });
@@ -132,6 +134,7 @@ export default function ConfiguracoesSistema() {
       }
       const configBody: Record<string, string | boolean> = {
         publicKey: mpCredentials.publicKey.trim(),
+        environment: mpCredentials.environment,
         enabled: mpCredentials.enabled,
       };
       if (mpCredentials.accessToken.trim()) configBody.accessToken = mpCredentials.accessToken.trim();
@@ -149,9 +152,11 @@ export default function ConfiguracoesSistema() {
         ...prev,
         publicKey: updatedConfig.publicKey || "",
         accessToken: "",
+        environment: updatedConfig.environment === "sandbox" ? "sandbox" : "production",
         enabled: !!updatedConfig.enabled,
         configured: !!updatedConfig.configured,
       }));
+      setMpBetaInfo({ beta: !!updatedConfig.beta, environment: updatedConfig.environment || "production" });
       setSavedMp(true);
 
       const feesResponse = await fetch(`${PAYMENTS_API_BASE}/payments/admin/fees`, {
@@ -298,6 +303,32 @@ export default function ConfiguracoesSistema() {
           <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-5">Regras Financeiras</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium mb-1.5">Ambiente das credenciais</label>
+                <div className="grid grid-cols-2 gap-2 max-w-md">
+                  {(["production", "sandbox"] as const).map(environment => (
+                    <button
+                      key={environment}
+                      type="button"
+                      onClick={() => setMpCredentials(prev => ({ ...prev, environment, publicKey: "", accessToken: "", configured: false }))}
+                      className={`rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors ${
+                        mpCredentials.environment === environment
+                          ? environment === "production"
+                            ? "border-green-500 bg-green-50 text-green-800"
+                            : "border-amber-500 bg-amber-50 text-amber-800"
+                          : "border-gray-200 bg-white text-gray-600"
+                      }`}
+                    >
+                      {environment === "production" ? "Produção" : "Teste / Sandbox"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  {mpCredentials.environment === "production"
+                    ? "Use Public Key e Access Token de produção iniciados por APP_USR-."
+                    : "Use Public Key e Access Token de teste iniciados por TEST-."}
+                </p>
+              </div>
               <div>
                 <label className="block text-sm font-medium mb-1.5">
                   Percentual de Comissão do Afiliado (%)
@@ -475,7 +506,7 @@ export default function ConfiguracoesSistema() {
                 <input
                   value={mpCredentials.publicKey}
                   onChange={e => setMpCredentials(prev => ({ ...prev, publicKey: e.target.value }))}
-                  placeholder="APP_USR-..."
+                  placeholder={mpCredentials.environment === "production" ? "APP_USR-..." : "TEST-..."}
                   autoComplete="off"
                   className="w-full px-4 py-2.5 border rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
                 />
@@ -489,7 +520,9 @@ export default function ConfiguracoesSistema() {
                   type="password"
                   value={mpCredentials.accessToken}
                   onChange={e => setMpCredentials(prev => ({ ...prev, accessToken: e.target.value }))}
-                  placeholder={mpCredentials.configured ? "Deixe em branco para manter o token atual" : "APP_USR-..."}
+                  placeholder={mpCredentials.configured
+                    ? "Deixe em branco para manter o token atual"
+                    : mpCredentials.environment === "production" ? "APP_USR-..." : "TEST-..."}
                   autoComplete="new-password"
                   className="w-full px-4 py-2.5 border rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
                 />

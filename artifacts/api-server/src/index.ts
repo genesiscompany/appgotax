@@ -200,9 +200,14 @@ async function runStartupMigrations() {
       id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
       public_key TEXT,
       encrypted_access_token TEXT,
+      environment TEXT NOT NULL DEFAULT 'production',
       enabled BOOLEAN NOT NULL DEFAULT false,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`,
+    `ALTER TABLE mercado_pago_config ADD COLUMN IF NOT EXISTS environment TEXT NOT NULL DEFAULT 'production'`,
+    `UPDATE mercado_pago_config
+       SET environment = 'sandbox'
+       WHERE public_key LIKE 'TEST-%' AND environment = 'production'`,
     `INSERT INTO mercado_pago_config (id, enabled)
       VALUES (1, false)
       ON CONFLICT (id) DO NOTHING`,

@@ -64,10 +64,12 @@ export default function CarteiraScreen() {
     setIsToppingUp(true);
     try {
       const res = await topupWallet(customer.token, amountCents);
-      if (res.sandboxInitPoint) {
+      if (res.sandbox && res.sandboxInitPoint) {
         Linking.openURL(res.sandboxInitPoint);
       } else if (res.initPoint) {
         Linking.openURL(res.initPoint);
+      } else {
+        throw new Error("O Mercado Pago não retornou o link para pagamento.");
       }
       // reset field after flow
       setTopupAmount("");

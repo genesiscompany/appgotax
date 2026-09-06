@@ -7,7 +7,7 @@ import { creditWallet } from "../lib/wallet";
 import { customerIdFromRequest } from "../lib/customerToken";
 
 const router: IRouter = Router();
-const BETA = { beta: true, sandbox: true };
+const BETA = { beta: true };
 const METHODS = ["pix", "card", "wallet"] as const;
 type Method = typeof METHODS[number];
 const JWT_SECRET = process.env.JWT_SECRET || "gotaxi-admin-secret-2024";
@@ -52,7 +52,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
   try { const p = jwt.verify(token, JWT_SECRET) as any; if (p.papel !== "admin") throw new Error(); (req as any).admin = p; next(); }
   catch { res.status(401).json({ error: "unauthorized" }); }
 }
-function missingCredentials(res: Response) { res.status(503).json({ error: "mercado_pago_not_configured", message: "Mercado Pago credentials are not configured", ...BETA }); }
+function missingCredentials(res: Response) { res.status(503).json({ error: "mercado_pago_not_configured", message: "Configure e ative as credenciais do Mercado Pago no Super Admin.", ...BETA }); }
 class MercadoPagoApiError extends Error {
   constructor(public status: number, public providerCode?: string) {
     super(`Mercado Pago request failed (${status}${providerCode ? `: ${providerCode}` : ""})`);
@@ -76,42 +76,38 @@ async function fees() {
   return Object.fromEntries(METHODS.map(m => [m, Number((rows.rows as any[]).find(r => r.method === m)?.percentage_basis_points ?? 0)])) as Record<Method, number>;
 }
 async function globalMercadoPagoConfig() {
-  const rows = await db.execute(sql`SELECT public_key, encrypted_access_token, enabled FROM mercado_pago_config WHERE id = 1 LIMIT 1`);
+  const rows = await db.execute(sql`SELECT public_key, encrypted_access_token, environment, enabled FROM mercado_pago_config WHERE id = 1 LIMIT 1`);
   const config = rows.rows[0] as any;
-  const developmentOrdersPublicKey = process.env.NODE_ENV !== "production"
-    ? String(process.env.MERCADO_PAGO_ORDERS_TEST_PUBLIC_KEY ?? "")
-    : "";
-  const developmentTestPublicKey = process.env.NODE_ENV !== "production"
-    ? developmentOrdersPublicKey || String(process.env.MERCADO_PAGO_TEST_PUBLIC_KEY ?? "")
-    : "";
+  const environment = config?.environment === "sandbox" ? "sandbox" : "production";
+  const environmentPublicKey = environment === "sandbox"
+    ? String(process.env.MERCADO_PAGO_ORDERS_TEST_PUBLIC_KEY ?? process.env.MERCADO_PAGO_TEST_PUBLIC_KEY ?? "")
+    : String(process.env.MERCADO_PAGO_PUBLIC_KEY ?? "");
+  const environmentAccessToken = environment === "sandbox"
+    ? String(process.env.MERCADO_PAGO_ORDERS_TEST_ACCESS_TOKEN ?? process.env.MERCADO_PAGO_TEST_ACCESS_TOKEN ?? "")
+    : String(process.env.MERCADO_PAGO_ACCESS_TOKEN ?? "");
   return {
-    publicKey: developmentTestPublicKey || String(config?.public_key ?? process.env.MERCADO_PAGO_PUBLIC_KEY ?? ""),
+    publicKey: String(config?.public_key ?? environmentPublicKey),
     encryptedAccessToken: String(config?.encrypted_access_token ?? ""),
-    enabled: developmentTestPublicKey
-      ? !!(developmentOrdersPublicKey ? process.env.MERCADO_PAGO_ORDERS_TEST_ACCESS_TOKEN : process.env.MERCADO_PAGO_TEST_ACCESS_TOKEN)
-      : !!config?.enabled,
-    usesDevelopmentTestCredentials: !!developmentTestPublicKey,
-    usesDevelopmentOrdersCredentials: !!developmentOrdersPublicKey,
+    enabled: !!config?.enabled,
+    environment,
+    environmentAccessToken,
   };
 }
 async function globalAccessToken() {
   const config = await globalMercadoPagoConfig();
-  if (config.usesDevelopmentOrdersCredentials) return process.env.MERCADO_PAGO_ORDERS_TEST_ACCESS_TOKEN || "";
-  if (config.usesDevelopmentTestCredentials) return process.env.MERCADO_PAGO_TEST_ACCESS_TOKEN || "";
   if (config.encryptedAccessToken) return decryptToken(config.encryptedAccessToken);
-  return process.env.MERCADO_PAGO_ACCESS_TOKEN || "";
+  return config.environmentAccessToken;
 }
 function globalCredentialsAvailable(config: Awaited<ReturnType<typeof globalMercadoPagoConfig>>) {
-  if (config.usesDevelopmentOrdersCredentials) {
-    return !!config.publicKey && !!process.env.MERCADO_PAGO_ORDERS_TEST_ACCESS_TOKEN;
-  }
-  if (config.usesDevelopmentTestCredentials) {
-    return !!config.publicKey && !!process.env.MERCADO_PAGO_TEST_ACCESS_TOKEN;
-  }
-  return !!config.publicKey && (!!config.encryptedAccessToken || !!process.env.MERCADO_PAGO_ACCESS_TOKEN);
+  return !!config.publicKey && (!!config.encryptedAccessToken || !!config.environmentAccessToken);
+}
+function globalCredentialEnvironmentMatches(config: Awaited<ReturnType<typeof globalMercadoPagoConfig>>) {
+  return config.environment === "sandbox"
+    ? config.publicKey.startsWith("TEST-")
+    : config.publicKey.startsWith("APP_USR-");
 }
 function globalIntegrationConfigured(config: Awaited<ReturnType<typeof globalMercadoPagoConfig>>) {
-  return config.enabled && globalCredentialsAvailable(config);
+  return config.enabled && globalCredentialsAvailable(config) && globalCredentialEnvironmentMatches(config);
 }
 async function resolveAmount(module: string, referenceId: string) {
   const maps: Record<string, { table: string; amount: string }> = {
@@ -443,10 +439,11 @@ router.put("/admin/partner-config/:empresaId", requireAdmin, async (req, res) =>
 });
 router.get("/admin/config", requireAdmin, async (_req, res) => {
   const config = await globalMercadoPagoConfig();
-  res.json({ publicKey: config.publicKey, configured: globalCredentialsAvailable(config), enabled: config.enabled, ...BETA });
+  res.json({ publicKey: config.publicKey, configured: globalCredentialsAvailable(config) && globalCredentialEnvironmentMatches(config), enabled: config.enabled, environment: config.environment, sandbox: config.environment === "sandbox", ...BETA });
 });
 router.put("/admin/config", requireAdmin, async (req, res) => {
   const b = req.body || {};
+  const environment = b.environment === "sandbox" ? "sandbox" : "production";
   if (b.accessToken !== undefined && (typeof b.accessToken !== "string" || b.accessToken.trim().length < 10)) {
     res.status(400).json({ error: "invalid_access_token", message: "Access Token inválido" });
     return;
@@ -454,17 +451,37 @@ router.put("/admin/config", requireAdmin, async (req, res) => {
   try {
     const previous = await globalMercadoPagoConfig();
     const publicKey = typeof b.publicKey === "string" ? b.publicKey.trim() : previous.publicKey;
+    const environmentChanged = environment !== previous.environment;
+    if (environment === "sandbox" && publicKey && !publicKey.startsWith("TEST-")) {
+      res.status(400).json({ error: "invalid_public_key_environment", message: "No ambiente de teste, use uma Public Key iniciada por TEST-." }); return;
+    }
+    if (environment === "production" && publicKey && !publicKey.startsWith("APP_USR-")) {
+      res.status(400).json({ error: "invalid_public_key_environment", message: "No ambiente de produção, use uma Public Key iniciada por APP_USR-." }); return;
+    }
+    if (b.accessToken !== undefined) {
+      const accessToken = b.accessToken.trim();
+      const validPrefix = environment === "sandbox" ? accessToken.startsWith("TEST-") : accessToken.startsWith("APP_USR-");
+      if (!validPrefix) {
+        res.status(400).json({ error: "invalid_access_token_environment", message: `O Access Token não pertence ao ambiente de ${environment === "sandbox" ? "teste" : "produção"}.` }); return;
+      }
+    }
+    if (environmentChanged && b.accessToken === undefined) {
+      res.status(400).json({ error: "access_token_required_for_environment_change", message: "Informe novamente o Access Token ao trocar o ambiente." }); return;
+    }
     const encrypted = b.accessToken === undefined ? previous.encryptedAccessToken : encryptToken(b.accessToken.trim());
     const enabled = !!b.enabled;
-    const tokenAvailable = !!encrypted || !!process.env.MERCADO_PAGO_ACCESS_TOKEN;
+    const environmentToken = environment === "sandbox"
+      ? process.env.MERCADO_PAGO_ORDERS_TEST_ACCESS_TOKEN || process.env.MERCADO_PAGO_TEST_ACCESS_TOKEN
+      : process.env.MERCADO_PAGO_ACCESS_TOKEN;
+    const tokenAvailable = !!encrypted || !!environmentToken;
     if (enabled && (!publicKey || !tokenAvailable)) {
       res.status(400).json({ error: "mercado_pago_credentials_required", message: "Public Key e Access Token são obrigatórios para ativar o Mercado Pago" });
       return;
     }
-    await db.execute(sql`INSERT INTO mercado_pago_config (id, public_key, encrypted_access_token, enabled)
-      VALUES (1, ${publicKey || null}, ${encrypted || null}, ${enabled})
-      ON CONFLICT (id) DO UPDATE SET public_key = EXCLUDED.public_key, encrypted_access_token = EXCLUDED.encrypted_access_token, enabled = EXCLUDED.enabled, updated_at = NOW()`);
-    res.json({ publicKey, configured: !!publicKey && tokenAvailable, enabled, ...BETA });
+    await db.execute(sql`INSERT INTO mercado_pago_config (id, public_key, encrypted_access_token, environment, enabled)
+      VALUES (1, ${publicKey || null}, ${encrypted || null}, ${environment}, ${enabled})
+      ON CONFLICT (id) DO UPDATE SET public_key = EXCLUDED.public_key, encrypted_access_token = EXCLUDED.encrypted_access_token, environment = EXCLUDED.environment, enabled = EXCLUDED.enabled, updated_at = NOW()`);
+    res.json({ publicKey, configured: !!publicKey && tokenAvailable, enabled, environment, sandbox: environment === "sandbox", ...BETA });
   } catch (err) {
     (req as any).log?.error({ err: err instanceof Error ? err.message : "unknown" }, "Mercado Pago admin configuration failed");
     res.status(503).json({ error: "credential_encryption_unavailable", message: "Não foi possível armazenar as credenciais de pagamento" });
@@ -480,7 +497,7 @@ router.get("/cards/config", requireCustomer, async (_req, res) => {
   const config = await globalMercadoPagoConfig();
   if (!globalIntegrationConfigured(config)) { missingCredentials(res); return; }
   // This endpoint intentionally exposes only the SDK key and environment flag.
-  res.json({ publicKey: config.publicKey, sandbox: config.usesDevelopmentTestCredentials || config.publicKey.startsWith("TEST-") });
+  res.json({ publicKey: config.publicKey, sandbox: config.environment === "sandbox" });
 });
 router.get("/cards", requireCustomer, async (req, res) => {
   await ensureServicePaymentSchema();
@@ -589,16 +606,18 @@ router.get("/wallet/ledger", requireCustomer, async (req, res) => { const r = aw
 router.post("/wallet/topup", requireCustomer, async (req, res) => {
   const amountCents = Number(req.body?.amountCents);
   if (!Number.isInteger(amountCents) || amountCents < 100 || amountCents > 100000000) { res.status(400).json({ error: "invalid_amount_cents" }); return; }
-  const token = await globalAccessToken();
-  if (!token) { missingCredentials(res); return; }
-  const externalReference = `wallet-topup:${(req as any).customerId}:${randomUUID()}`;
   try {
+    const config = await globalMercadoPagoConfig();
+    if (!globalIntegrationConfigured(config)) { missingCredentials(res); return; }
+    const token = await globalAccessToken();
+    if (!token) { missingCredentials(res); return; }
+    const externalReference = `wallet-topup:${(req as any).customerId}:${randomUUID()}`;
     const base = hostUrl(req);
     const preference = await mp("/checkout/preferences", token, { method: "POST", body: JSON.stringify({ items: [{ title: "Recarga de carteira", quantity: 1, unit_price: amountCents / 100, currency_id: "BRL" }], external_reference: externalReference, notification_url: `${base}/api/payments/webhook/mercado-pago`, back_urls: { success: `${base}/`, failure: `${base}/`, pending: `${base}/` }, auto_return: "approved" }) });
     const tx = await db.execute(sql`INSERT INTO payment_transactions (customer_id, module, reference_id, payment_source, method, status, gross_amount_cents, platform_fee_cents, provider_preference_id, init_point, sandbox_init_point, external_reference, idempotency_key)
       VALUES (${(req as any).customerId}, 'wallet_topup', ${externalReference}, 'mercado_pago', 'wallet', 'pending', ${amountCents}, 0, ${preference.id ?? null}, ${preference.init_point ?? null}, ${preference.sandbox_init_point ?? null}, ${externalReference}, ${`topup:${externalReference}`}) RETURNING id`);
-    res.status(201).json({ transactionId: (tx.rows[0] as any).id, initPoint: preference.init_point ?? null, sandboxInitPoint: preference.sandbox_init_point ?? null, ...BETA });
-  } catch (err) { (req as any).log?.error({ err: err instanceof Error ? err.message : "unknown" }, "payment topup failed"); res.status(502).json({ error: "mercado_pago_unavailable", ...BETA }); }
+    res.status(201).json({ transactionId: (tx.rows[0] as any).id, initPoint: preference.init_point ?? null, sandboxInitPoint: config.environment === "sandbox" ? preference.sandbox_init_point ?? null : null, sandbox: config.environment === "sandbox", ...BETA });
+  } catch (err) { (req as any).log?.error({ err: err instanceof Error ? err.message : "unknown" }, "payment topup failed"); res.status(502).json({ error: "mercado_pago_unavailable", message: "O Mercado Pago recusou a criação da recarga. Confira se as credenciais e o ambiente estão corretos.", ...BETA }); }
 });
 router.post("/checkout", requireCustomer, async (req, res) => {
   const { module, referenceId, mercadoPagoMethod, paymentToken } = req.body || {};
