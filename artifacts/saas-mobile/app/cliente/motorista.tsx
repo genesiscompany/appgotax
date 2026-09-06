@@ -61,7 +61,8 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 }
 
 function calcPrecoCategoria(cat: Categoria, km: number): number {
-  return Math.max(cat.taxa_minima, Math.round((cat.taxa_minima + cat.taxa_por_km * km) * 100) / 100);
+  if (km <= 3) return Number(cat.taxa_minima);
+  return Math.round(cat.taxa_por_km * km * 100) / 100;
 }
 
 const CATEGORIA_ICONES: Record<string, "navigation" | "star" | "award"> = {
@@ -201,9 +202,22 @@ export default function ClienteMotorista() {
   }, [customer?.token]);
 
   const catSelecionada = categorias.find(c => c.id === catSel) ?? null;
-  const preco = catSelecionada && distanciaKm > 0
-    ? calcPrecoCategoria(catSelecionada, distanciaKm)
+  const distanciaAtePassageiroKm = motoristasDisponiveis.reduce((menor, motorista) => {
+    const km = haversineKm(
+      Number(motorista.lat),
+      Number(motorista.lng),
+      origemLatLng.lat,
+      origemLatLng.lng,
+    );
+    return Number.isFinite(km) ? Math.min(menor, km) : menor;
+  }, Number.POSITIVE_INFINITY);
+  const distanciaCobradaKm = Math.round((
+    distanciaKm + (Number.isFinite(distanciaAtePassageiroKm) ? distanciaAtePassageiroKm : 0)
+  ) * 100) / 100;
+  const precoEstimado = catSelecionada && distanciaCobradaKm > 0
+    ? calcPrecoCategoria(catSelecionada, distanciaCobradaKm)
     : catSelecionada?.taxa_minima ?? 0;
+  const preco = corridaData?.valor != null ? Number(corridaData.valor) : precoEstimado;
   const tipoNome = catSelecionada?.nome ?? "Selecione o tipo";
 
   // ── Fetch categorias from API ────────────────────────────────────────────────
@@ -237,13 +251,14 @@ export default function ClienteMotorista() {
   const fetchDisponiveis = useCallback(async () => {
     try {
       const catNome = categorias.find(c => c.id === catSel)?.nome;
-      const url = catNome
-        ? `${API_BASE}/motorista/disponiveis?categoria=${encodeURIComponent(catNome)}`
-        : `${API_BASE}/motorista/disponiveis`;
+      const params = new URLSearchParams();
+      if (catNome) params.set("categoria", catNome);
+      params.set("payment_source", paymentPayload(pagamento).payment_source);
+      const url = `${API_BASE}/motorista/disponiveis?${params.toString()}`;
       const res = await fetch(url);
       if (res.ok) setMotoristasDisponiveis(await res.json());
     } catch {}
-  }, [catSel, categorias]);
+  }, [catSel, categorias, pagamento]);
 
   useEffect(() => {
     if (estado !== "idle") return;
@@ -251,6 +266,10 @@ export default function ClienteMotorista() {
     const t = setInterval(fetchDisponiveis, 12_000);
     return () => clearInterval(t);
   }, [estado, fetchDisponiveis]);
+
+  useEffect(() => {
+    setMotoristasDisponiveis([]);
+  }, [catSel, pagamento]);
 
   // ── Geolocation on mount ─────────────────────────────────────────────────────
   const getLocation = useCallback(async () => {
@@ -372,7 +391,7 @@ export default function ClienteMotorista() {
   useEffect(() => {
     if (destinoText) {
       const km = haversineKm(origemLatLng.lat, origemLatLng.lng, destinoLatLng.lat, destinoLatLng.lng);
-      setDistanciaKm(Math.max(0.5, km));
+      setDistanciaKm(Math.max(0.1, Math.round(km * 100) / 100));
     } else {
       setDistanciaKm(0);
     }
@@ -526,8 +545,6 @@ export default function ClienteMotorista() {
           tipo_veiculo: catSelecionada?.nome || "GoTaxi X",
           forma_pagamento: selectedPayment.forma_pagamento,
           payment_source: selectedPayment.payment_source,
-          distancia_km: distanciaKm,
-          valor: preco,
           lat_origem: origemLatLng.lat,
           lng_origem: origemLatLng.lng,
           lat_destino: destinoLatLng.lat,
@@ -544,6 +561,7 @@ export default function ClienteMotorista() {
         });
         if (res.ok) {
           const corrida = await res.json();
+          setCorridaData(corrida);
           let cardCheckoutRejected = false;
           if (selectedPayment.checkoutMethod) {
             try {
@@ -1168,7 +1186,7 @@ export default function ClienteMotorista() {
         ) : (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }} style={{ marginBottom: 14 }}>
             {categorias.map(cat => {
-              const p = calcPrecoCategoria(cat, distanciaKm);
+              const p = cat.id === catSel ? preco : calcPrecoCategoria(cat, distanciaKm);
               const sel = catSel === cat.id;
               const icon = getCatIcon(cat.nome);
               return (

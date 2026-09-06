@@ -5,14 +5,6 @@ import { customerIdFromRequest } from "../lib/customerToken";
 
 const router: IRouter = Router();
 
-function decodeClienteToken(token: string): number | null {
-  try {
-    const decoded = Buffer.from(token, "base64").toString("utf-8");
-    const match = decoded.match(/^cl_(\d+):/);
-    return match ? Number(match[1]) : null;
-  } catch { return null; }
-}
-
 // ── Ensure corrida_mensagens table ────────────────────────────────────────────
 async function ensureMensagensTable() {
   await db.execute(sql`
@@ -70,12 +62,6 @@ router.get("/categorias", async (_req, res) => {
   }
 });
 
-function calcPreco(tipo: string, km: number): number {
-  const base = tipo === "premium" ? 8 : tipo === "conforto" ? 5 : 3;
-  const pkm = tipo === "premium" ? 4 : tipo === "conforto" ? 2.8 : 1.8;
-  return Math.round((base + pkm * km) * 100) / 100;
-}
-
 function estimaEspera(tipo: string): number {
   return tipo === "premium" ? 8 : tipo === "conforto" ? 5 : 3;
 }
@@ -86,7 +72,7 @@ router.post("/solicitar", async (req, res) => {
     const {
       empresa_id, passageiro_nome, passageiro_telefone,
       origem_endereco, destino_endereco, tipo_veiculo, categoria_nome,
-      forma_pagamento, payment_source, distancia_km, valor,
+      forma_pagamento, payment_source,
       lat_origem, lng_origem, lat_destino, lng_destino, observacoes,
     } = req.body;
     const empresaId = Number(empresa_id || 1);
@@ -116,18 +102,56 @@ router.post("/solicitar", async (req, res) => {
       ? await db.execute(sql`SELECT nome, taxa_minima, taxa_por_km FROM categorias_corrida WHERE nome = ${requestedCategory} AND ativo = true LIMIT 1`)
       : { rows: [] };
     const tariff = tariffRows.rows[0] as any;
-    if (paymentSource !== "direto" && (!quotedKm || !tariff)) {
-      return res.status(422).json({ error: "authoritative_quote_unavailable", message: "Coordenadas válidas e categoria ativa são obrigatórias para pagamento pelo app" });
+    if (!quotedKm || !tariff) {
+      return res.status(422).json({ error: "authoritative_quote_unavailable", message: "Coordenadas válidas e categoria ativa são obrigatórias para calcular a corrida" });
     }
-    const km = quotedKm ?? (Number(distancia_km) || 5);
-    const serverPrice = tariff ? Math.max(Number(tariff.taxa_minima), Number(tariff.taxa_por_km) * km) : null;
-    const valorFinal = serverPrice != null ? Math.round(serverPrice * 100) / 100 : (valor ?? calcPreco(tipoSafe, km));
+    const tripKm = quotedKm;
+    let pickupKm = 0;
+    let selectedDriver: any = null;
+    if (validCoords && requestedCategory) {
+      const nearestRows = await db.execute(`
+        SELECT ma.id, ma.nome, ma.veiculo_modelo, ma.veiculo_cor, ma.veiculo_placa,
+          ma.avaliacao_media, ma.lat, ma.lng, (
+          6371 * acos(LEAST(1.0,
+            cos(radians(${coords[0]})) * cos(radians(ma.lat)) *
+            cos(radians(ma.lng) - radians(${coords[1]})) +
+            sin(radians(${coords[0]})) * sin(radians(ma.lat))
+          ))
+        ) AS distancia_motorista_km
+        FROM motoristas_app ma
+        WHERE ma.online = true
+          AND ma.lat IS NOT NULL AND ma.lng IS NOT NULL
+          AND ma.ultimo_ping > NOW() - INTERVAL '3 minutes'
+          AND ma.status = 'aprovado'
+          AND (
+            ('${paymentSource}' = 'direto' AND ma.aceita_pagamento_direto = true)
+            OR ('${paymentSource}' IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true)
+          )
+          AND EXISTS (
+            SELECT 1 FROM motorista_categorias mc
+            WHERE mc.motorista_id = ma.id
+              AND mc.categoria_nome = '${esc(requestedCategory)}'
+          )
+        ORDER BY distancia_motorista_km ASC
+        LIMIT 1
+      `);
+      selectedDriver = nearestRows.rows[0] as any;
+      pickupKm = Math.max(0, Number(selectedDriver?.distancia_motorista_km ?? 0));
+    }
+    if (!selectedDriver) {
+      return res.status(409).json({ error: "no_driver_available", message: "Nenhum motorista disponível para esta categoria e forma de pagamento" });
+    }
+    const km = Math.round((tripKm + pickupKm) * 100) / 100;
+    const serverPrice = km <= 3
+      ? Number(tariff.taxa_minima)
+      : Number(tariff.taxa_por_km) * km;
+    const valorFinal = Math.round(serverPrice * 100) / 100;
 
     // Persist authenticated ownership so a later payment intent cannot be staged by another customer.
     const authToken = req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
     const signedCustomerId = customerIdFromRequest(req);
-    let clienteId: number | null = signedCustomerId ?? (paymentSource === "direto" ? decodeClienteToken(authToken) : null);
-    if (paymentSource !== "direto" && !signedCustomerId) {
+    const clienteId: number | null = signedCustomerId;
+    if (!clienteId) {
       return res.status(401).json({ error: "signed_customer_token_required" });
     }
     await db.execute(sql`ALTER TABLE corridas ADD COLUMN IF NOT EXISTS customer_id INTEGER`);
@@ -175,36 +199,7 @@ router.post("/solicitar", async (req, res) => {
     // ── Dispatch to nearest online driver (motoristas_app) ──────────────────
     if (lat_origem != null && lng_origem != null) {
       try {
-        // Find nearest online driver with recent ping (last 3 min) using Haversine
-        // Filter by category if provided (tipo_veiculo = category name like "GoTaxi X")
-        const catNome = String(categoria_nome || tipo_veiculo || "");
-        const catFilter = catNome
-          ? `AND EXISTS (
-               SELECT 1 FROM motorista_categorias mc
-               WHERE mc.motorista_id = ma.id AND mc.categoria_nome = '${esc(catNome)}'
-             )`
-          : "";
-
-        const driverRows = await db.execute(`
-          SELECT ma.id, ma.nome, ma.veiculo_modelo, ma.veiculo_cor, ma.veiculo_placa, ma.avaliacao_media, ma.lat, ma.lng
-          FROM motoristas_app ma
-          WHERE ma.online = true AND ma.lat IS NOT NULL AND ma.lng IS NOT NULL
-            AND ma.ultimo_ping > NOW() - INTERVAL '3 minutes'
-            AND ma.status = 'aprovado'
-             AND (
-               ('${paymentSource}' = 'direto' AND ma.aceita_pagamento_direto = true)
-                OR ('${paymentSource}' IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true)
-             )
-            ${catFilter}
-          ORDER BY (
-            6371 * acos(LEAST(1.0,
-              cos(radians(${Number(lat_origem)})) * cos(radians(ma.lat)) *
-              cos(radians(ma.lng) - radians(${Number(lng_origem)})) +
-              sin(radians(${Number(lat_origem)})) * sin(radians(ma.lat))
-            ))
-          ) ASC
-          LIMIT 1
-        `);
+        const driverRows = { rows: selectedDriver ? [selectedDriver] : [] };
 
         if (driverRows.rows.length > 0) {
           const driver = driverRows.rows[0] as any;
@@ -231,7 +226,7 @@ router.post("/solicitar", async (req, res) => {
               '${esc(String(origem_endereco || ""))}',
               '${esc(String(destino_endereco || ""))}',
               ${distMotorista.toFixed(2)}, ${tempoMotoristaMin},
-              ${km}, ${Math.round((km / 40) * 60)},
+              ${tripKm}, ${Math.round((tripKm / 40) * 60)},
               ${Number(lat_origem)}, ${Number(lng_origem)},
               ${lat_destino != null ? Number(lat_destino) : "NULL"},
               ${lng_destino != null ? Number(lng_destino) : "NULL"},
@@ -431,9 +426,15 @@ router.get("/motoristas-disponiveis", async (req, res) => {
 router.get("/disponiveis", async (req, res) => {
   try {
     const catParam = req.query.categoria as string | undefined;
+    const paymentSourceParam = String(req.query.payment_source || "");
     const catJoin = catParam
       ? `JOIN motorista_categorias mc ON mc.motorista_id = ma.id AND mc.categoria_nome = '${esc(catParam)}'`
       : "";
+    const paymentFilter = paymentSourceParam === "direto"
+      ? "AND ma.aceita_pagamento_direto = true"
+      : paymentSourceParam === "mercado_pago" || paymentSourceParam === "wallet"
+        ? "AND ma.aceita_pagamento_app = true"
+        : "";
     const rows = await db.execute(`
       SELECT ma.id, ma.nome, ma.veiculo_modelo, ma.veiculo_cor, ma.veiculo_placa,
              ma.avaliacao_media, ma.lat, ma.lng, ma.tipo_profissional
@@ -442,8 +443,9 @@ router.get("/disponiveis", async (req, res) => {
       WHERE ma.online = true
         AND ma.lat IS NOT NULL
         AND ma.lng IS NOT NULL
-        AND ma.ultimo_ping > NOW() - INTERVAL '2 minutes'
+        AND ma.ultimo_ping > NOW() - INTERVAL '3 minutes'
         AND ma.status = 'aprovado'
+        ${paymentFilter}
       ORDER BY ma.ultimo_ping DESC
     `);
     return res.json(rows.rows);
