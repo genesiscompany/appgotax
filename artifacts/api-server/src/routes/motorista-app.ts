@@ -10,6 +10,7 @@ import { finalizeServicePayment, settleServiceEarning } from "./payments";
 import { issueMotoristaToken, motoristaIdFromRequest } from "../lib/motoristaToken";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { encryptToken } from "./payments";
+import { gerarComissaoCliente } from "../lib/comissaoAfiliado";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -24,6 +25,21 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 15 * 1024 * 1024 } });
 
 const JWT_SECRET = process.env["JWT_SECRET"] || "gotaxi-admin-secret-2024";
+
+async function resolveClienteComissao(usuarioId?: number | null, email?: string | null, telefone?: string | null) {
+  const rows = await db.execute(sql`
+    SELECT id, email, telefone FROM usuarios
+    WHERE papel = 'cliente' AND (
+      (${usuarioId ?? null} IS NOT NULL AND id = ${usuarioId ?? null})
+      OR (${email?.trim().toLowerCase() || null} IS NOT NULL AND LOWER(email) = ${email?.trim().toLowerCase() || null})
+      OR (${telefone?.replace(/\D/g, "") || null} IS NOT NULL
+        AND REGEXP_REPLACE(COALESCE(telefone, ''), '\\D', '', 'g') = ${telefone?.replace(/\D/g, "") || null})
+    )
+    ORDER BY CASE WHEN id = ${usuarioId ?? null} THEN 0 ELSE 1 END
+    LIMIT 1
+  `);
+  return rows.rows[0] as { id: number; email: string | null; telefone: string | null } | undefined;
+}
 
 function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   const auth = req.headers.authorization;
@@ -1133,6 +1149,7 @@ async function ensureCorridasTable() {
   `));
   await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
   await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
+  await db.execute(sql.raw(`ALTER TABLE corridas ADD COLUMN IF NOT EXISTS customer_id INTEGER`));
 }
 
 // GET /corrida-pendente — poll for pending ride (driver app)
@@ -1297,8 +1314,8 @@ router.post("/corrida/:id/finalizar", async (req: Request, res: Response) => {
     let prePayment: any = null;
     try {
       prePayment = reserved.payment_source === "direto" ? null : await finalizeServicePayment("motorista", String(reserved.corrida_id), req);
-      if (prePayment?.method === "card" && prePayment.status !== "approved") {
-        throw new Error(["rejected", "cancelled", "refunded"].includes(String(prePayment.status)) ? "payment_rejected" : "payment_pending");
+      if (reserved.payment_source !== "direto" && prePayment?.status !== "approved") {
+        throw new Error(["rejected", "cancelled", "refunded"].includes(String(prePayment?.status)) ? "payment_rejected" : "payment_pending");
       }
       if (prePayment && ["rejected", "cancelled", "refunded"].includes(String(prePayment.status))) throw new Error("payment_rejected");
     } catch (error) {
@@ -1325,7 +1342,7 @@ router.post("/corrida/:id/finalizar", async (req: Request, res: Response) => {
         const paymentRows = await tx.execute(sql`SELECT method, status FROM payment_transactions
           WHERE module = 'motorista' AND reference_id = ${String(reserved.corrida_id)} FOR UPDATE`);
         const payment = paymentRows.rows[0] as any;
-        if (payment?.method === "card" && payment.status !== "approved") {
+        if (payment?.status !== "approved") {
           return { ...reserved, paymentBlocked: String(payment.status ?? "pending") };
         }
       }
@@ -1347,6 +1364,17 @@ router.post("/corrida/:id/finalizar", async (req: Request, res: Response) => {
     if (!finalized) { res.status(409).json({ error: "finalization_reservation_lost" }); return; }
     if (finalized.payment_source === "direto") await settleServiceEarning("motorista", String(finalized.corrida_id), null);
     else if (prePayment?.status === "approved") await settleServiceEarning("motorista", String(finalized.corrida_id), Number(prePayment.id));
+    // A solicitação pelo app já registra este mesmo evento. Repetir aqui é
+    // seguro e cobre corridas legadas, pois tipo/referência são idênticos.
+    try {
+      const clienteRows = await db.execute(sql`SELECT customer_id, passageiro_telefone, valor, forma_pagamento
+        FROM corridas WHERE id = ${Number(finalized.corrida_id)} LIMIT 1`);
+      const corrida = clienteRows.rows[0] as any;
+      const cliente = await resolveClienteComissao(corrida?.customer_id, null, corrida?.passageiro_telefone);
+      // Corridas corporativas são comissionadas apenas quando o fluxo
+      // corporativo confirma o valor final, não nesta etapa operacional.
+      if (cliente && corrida?.forma_pagamento !== "corporativo") await gerarComissaoCliente({ usuarioId: cliente.id, usuarioEmail: cliente.email, usuarioTelefone: cliente.telefone, valor: corrida?.valor, tipoEvento: "corrida", referenciaId: Number(finalized.corrida_id), descricao: `Corrida #${finalized.corrida_id}` });
+    } catch (commErr) { console.error("[corrida/finalizar] comissão erro:", commErr); }
     return res.json({ ok: true, valor: finalized.valor, duplicate: finalized.duplicate, paymentStatus: prePayment ? (prePayment.status === "approved" ? "pago" : "pendente") : "direto", paymentSource: finalized.payment_source, pix: prePayment?.pix ?? null });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
@@ -1408,7 +1436,7 @@ router.post("/pdv/entrega/:id/saiu", async (req: Request, res: Response) => {
       UPDATE pedidos_pdv
       SET status = 'saiu_entrega', saiu_em = NOW(), atualizado_em = NOW()
       WHERE id = ${pedidoId} AND boy_id = ${motoristaId} AND status IN ('pronto','preparando','novo','pendente')
-      RETURNING id
+      RETURNING id, modulo, cliente_nome, cliente_whatsapp, total, taxa_entrega
     `));
     if (!r.rows.length) return res.status(404).json({ error: "not_found_or_not_yours" });
     // Keep entregas_solicitadas in sync (em_andamento = heading to destination)
@@ -1433,7 +1461,7 @@ router.post("/pdv/entrega/:id/entregue", async (req: Request, res: Response) => 
       UPDATE pedidos_pdv
       SET status = 'entregue', entregue_em = NOW(), atualizado_em = NOW()
       WHERE id = ${pedidoId} AND boy_id = ${motoristaId} AND status NOT IN ('entregue','cancelado')
-      RETURNING id
+      RETURNING id, modulo, cliente_nome, cliente_whatsapp, total, taxa_entrega
     `));
     if (!r.rows.length) return res.status(404).json({ error: "not_found_or_not_yours" });
     // Finalize the linked entregas_solicitadas record so it no longer appears as active
@@ -1449,6 +1477,15 @@ router.post("/pdv/entrega/:id/entregue", async (req: Request, res: Response) => 
         WHERE id = ${motoristaId}
       `));
     } catch (_) { /* best-effort */ }
+    const pedido = r.rows[0] as any;
+    // Pedidos food já recebem comissão na criação com esta mesma chave; a
+    // chamada idempotente cobre pedidos PDV criados sem o fluxo food.
+    try {
+      if (pedido.modulo !== "ecommerce") {
+        const cliente = await resolveClienteComissao(null, null, pedido.cliente_whatsapp);
+        if (cliente) await gerarComissaoCliente({ usuarioId: cliente.id, usuarioEmail: cliente.email, usuarioTelefone: cliente.telefone, valor: Number(pedido.total || pedido.taxa_entrega || 0), tipoEvento: pedido.modulo === "food" ? "pedido_food" : "pedido_pdv", origemEvento: "pedidos_pdv", referenciaId: pedidoId, descricao: `Pedido delivery #${pedidoId}` });
+      }
+    } catch (commErr) { console.error("[pdv/entrega] comissão erro:", commErr); }
     return res.json({ ok: true });
   } catch (err) { console.error("[entregue]", err); return res.status(500).json({ error: "server_error" }); }
 });
@@ -1607,6 +1644,7 @@ async function ensureEntregasTable() {
   `));
   await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
   await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
+  await db.execute(sql.raw(`ALTER TABLE entregas ADD COLUMN IF NOT EXISTS customer_id INTEGER`));
 }
 
 // POST /entrega/simular — create a test delivery for entregador/delivery (admin)
@@ -1861,8 +1899,8 @@ router.post("/entrega/:id/finalizar", async (req: Request, res: Response) => {
     let prePayment: any = null;
     try {
       prePayment = source === "direto" ? null : await finalizeServicePayment("entrega", String(reserved.entrega_id), req);
-      if (prePayment?.method === "card" && prePayment.status !== "approved") {
-        throw new Error(["rejected", "cancelled", "refunded"].includes(String(prePayment.status)) ? "payment_rejected" : "payment_pending");
+      if (source !== "direto" && prePayment?.status !== "approved") {
+        throw new Error(["rejected", "cancelled", "refunded"].includes(String(prePayment?.status)) ? "payment_rejected" : "payment_pending");
       }
       if (prePayment && ["rejected", "cancelled", "refunded"].includes(String(prePayment.status))) throw new Error("payment_rejected");
     } catch (error) {
@@ -1889,7 +1927,7 @@ router.post("/entrega/:id/finalizar", async (req: Request, res: Response) => {
         const paymentRows = await tx.execute(sql`SELECT method, status FROM payment_transactions
           WHERE module = 'entrega' AND reference_id = ${String(reserved.entrega_id)} FOR UPDATE`);
         const payment = paymentRows.rows[0] as any;
-        if (payment?.method === "card" && payment.status !== "approved") {
+        if (payment?.status !== "approved") {
           return { ...reserved, paymentBlocked: String(payment.status ?? "pending") };
         }
       }
@@ -1911,6 +1949,13 @@ router.post("/entrega/:id/finalizar", async (req: Request, res: Response) => {
     if (!final) { res.status(409).json({ error: "finalization_reservation_lost" }); return; }
     if (source === "direto") await settleServiceEarning("entrega", String(reserved.entrega_id), null);
     else if (prePayment?.status === "approved") await settleServiceEarning("entrega", String(reserved.entrega_id), Number(prePayment.id));
+    try {
+      const clienteRows = await db.execute(sql`SELECT customer_id, remetente_telefone, valor
+        FROM entregas WHERE id = ${Number(reserved.entrega_id)} LIMIT 1`);
+      const entrega = clienteRows.rows[0] as any;
+      const cliente = await resolveClienteComissao(entrega?.customer_id, null, entrega?.remetente_telefone);
+      if (cliente) await gerarComissaoCliente({ usuarioId: cliente.id, usuarioEmail: cliente.email, usuarioTelefone: cliente.telefone, valor: entrega?.valor, tipoEvento: "entrega", referenciaId: Number(reserved.entrega_id), descricao: `Entrega #${reserved.entrega_id}` });
+    } catch (commErr) { console.error("[entrega/finalizar] comissão erro:", commErr); }
     return res.json({ ok: true, paymentSource: source, paymentStatus: prePayment ? (prePayment.status === "approved" ? "pago" : "pendente") : "direto", pix: prePayment?.pix ?? null });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });

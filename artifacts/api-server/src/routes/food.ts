@@ -335,7 +335,7 @@ router.post("/pedido", async (req, res) => {
       return res.status(500).json({ error: "server_error" });
     }
 
-    // Insert order items
+    // Insert order items + atomically decrement promo quantity if applicable
     for (const item of itens) {
       await db.execute(`
         INSERT INTO itens_pedido_pdv (pedido_id, produto_nome, quantidade, preco_unitario, total, observacoes)
@@ -346,21 +346,20 @@ router.post("/pedido", async (req, res) => {
                 ${Number(item.total) || 0},
                 '${String(item.observacoes || "").replace(/'/g, "''")}')
       `);
-    }
 
-    // Generate affiliate commission for the logged-in customer (if referred)
-    try {
-      const { gerarComissaoCliente, decodeClienteTokenFromReq } = await import("../lib/comissaoAfiliado");
-      const uid = usuarioId ?? decodeClienteTokenFromReq(req);
-      await gerarComissaoCliente({
-        usuarioId: uid,
-        valor: totalNum,
-        tipoEvento: "pedido_food",
-        referenciaId: Number(pedido.id),
-        descricao: `Pedido food #${pedido.id}`,
-      });
-    } catch (commErr) {
-      console.error("[food/pedido] comissão erro:", commErr);
+      // Decrement promo stock if this item was purchased at a promotional price
+      if (item.produto_id && item.preco_promocional) {
+        await db.execute(`
+          UPDATE promocoes_pdv
+          SET quantidade_disponivel = GREATEST(0, quantidade_disponivel - ${Number(item.quantidade) || 1})
+          WHERE empresa_id = ${Number(empresa_id)}
+            AND produto_id = ${Number(item.produto_id)}
+            AND ativo = true
+            AND preco_promocional IS NOT NULL
+            AND (validade IS NULL OR validade >= CURRENT_DATE)
+            AND quantidade_disponivel > 0
+        `);
+      }
     }
 
     broadcastToEmpresa(Number(empresa_id), {
@@ -397,7 +396,7 @@ router.get("/parceiros/:empresaId/cardapio", async (req, res) => {
         SELECT
           p.id, p.nome, p.descricao, p.preco, p.imagem, p.categoria_id,
           p.tamanhos, c.nome as categoria_nome,
-          promo.preco_promocional,
+          promo.promo_id, promo.preco_promocional, promo.quantidade_disponivel AS quantidade_disponivel_promo,
           COALESCE((
             SELECT json_agg(json_build_object('id', e.id, 'nome', e.nome, 'preco', e.preco, 'obrigatorio', COALESCE(e.obrigatorio, false)))
             FROM produto_extras_pdv pe2
@@ -408,30 +407,30 @@ router.get("/parceiros/:empresaId/cardapio", async (req, res) => {
             SELECT json_agg(
               json_build_object(
                 'id', g.id, 'nome', g.nome,
-                'min_selecoes', COALESCE(pg.min_selecoes, g.min_selecoes),
-                'max_selecoes', COALESCE(pg.max_selecoes, g.max_selecoes),
-                'obrigatorio', COALESCE(pg.obrigatorio, g.obrigatorio),
+                'min_selecoes', g.min_selecoes, 'max_selecoes', g.max_selecoes,
+                'obrigatorio', g.obrigatorio,
                 'opcoes', COALESCE((
                   SELECT json_agg(json_build_object('id', o.id, 'nome', o.nome, 'preco_adicional', o.preco_adicional) ORDER BY o.ordem, o.id)
-                  FROM opcoes_grupo_extras_pdv o WHERE o.grupo_id = g.id AND o.ativo IS NOT FALSE
+                  FROM opcoes_grupo_extras_pdv o WHERE o.grupo_id = g.id AND o.ativo = true
                 ), '[]'::json)
               ) ORDER BY pg.ordem, g.id
             )
             FROM produto_grupos_extras_pdv pg
             JOIN grupos_extras_pdv g ON g.id = pg.grupo_id
-            WHERE pg.produto_id = p.id AND g.ativo IS NOT FALSE
+            WHERE pg.produto_id = p.id AND g.ativo = true
           ), '[]'::json) as grupos
         FROM produtos_pdv p
         LEFT JOIN categorias_pdv c ON c.id = p.categoria_id
         LEFT JOIN (
-          SELECT produto_id, MIN(preco_promocional) AS preco_promocional
+          SELECT DISTINCT ON (produto_id)
+            produto_id, id AS promo_id, preco_promocional, quantidade_disponivel
           FROM promocoes_pdv
           WHERE ativo = true
             AND produto_id IS NOT NULL
             AND preco_promocional IS NOT NULL
             AND (validade IS NULL OR validade >= CURRENT_DATE)
             AND (quantidade_disponivel IS NULL OR quantidade_disponivel > 0)
-          GROUP BY produto_id
+          ORDER BY produto_id, preco_promocional ASC
         ) promo ON promo.produto_id = p.id
         WHERE p.empresa_id = ${empresaId} AND p.ativo = true
         ORDER BY c.nome NULLS LAST, p.nome

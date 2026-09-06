@@ -79,8 +79,11 @@ async function resolveAfiliadoByCode(
 
 export interface GerarComissaoOpts {
   usuarioId: number | null | undefined;
+  usuarioEmail?: string | null;
+  usuarioTelefone?: string | null;
   valor: number | null | undefined;
   tipoEvento: string;
+  origemEvento?: string;
   referenciaId?: number | null;
   descricao?: string | null;
 }
@@ -103,15 +106,31 @@ export interface GerarComissaoOpts {
  */
 export async function gerarComissaoCliente(opts: GerarComissaoOpts): Promise<void> {
   try {
-    const { usuarioId, valor, tipoEvento, referenciaId, descricao } = opts;
+    const { valor, tipoEvento, origemEvento, referenciaId, descricao } = opts;
     const valorNum = Number(valor || 0);
-    if (!usuarioId || valorNum <= 0) return;
+    if (valorNum <= 0) return;
 
     const u = (await db.execute(sql`
-      SELECT indicado_por FROM usuarios WHERE id = ${usuarioId} LIMIT 1
+      SELECT id, indicado_por, nome, email FROM usuarios
+      WHERE
+        papel = 'cliente'
+        AND (
+          (${opts.usuarioId ?? null} IS NOT NULL AND id = ${opts.usuarioId ?? null})
+          OR (
+            ${opts.usuarioEmail?.trim().toLowerCase() || null} IS NOT NULL
+            AND LOWER(email) = ${opts.usuarioEmail?.trim().toLowerCase() || null}
+          )
+          OR (
+            ${opts.usuarioTelefone?.replace(/\D/g, "") || null} IS NOT NULL
+            AND REGEXP_REPLACE(COALESCE(telefone, ''), '\\D', '', 'g') = ${opts.usuarioTelefone?.replace(/\D/g, "") || null}
+          )
+        )
+      ORDER BY CASE WHEN id = ${opts.usuarioId ?? null} THEN 0 ELSE 1 END
+      LIMIT 1
     `)).rows as any[];
+    const usuarioId = Number(u[0]?.id || 0);
     const codigo = u[0]?.indicado_por;
-    if (!codigo) return;
+    if (!usuarioId || !codigo) return;
 
     const afi = await resolveAfiliadoByCode(String(codigo));
     if (!afi) return;
@@ -129,14 +148,62 @@ export async function gerarComissaoCliente(opts: GerarComissaoOpts): Promise<voi
     const valorComissao = Math.round(valorNum * pct) / 100;
     if (valorComissao <= 0) return;
 
-    await db.execute(sql`
-      INSERT INTO afiliado_comissoes
-        (afiliado_id, tipo_evento, valor_transacao, percentual, valor_comissao,
-         status, referencia_id, descricao)
-      VALUES
-        (${afi.afiliadoId}, ${tipoEvento}, ${valorNum}, ${pct}, ${valorComissao},
-         'pendente', ${referenciaId ?? null}, ${descricao ?? null})
-    `);
+    await db.transaction(async tx => {
+      const eventKey = `${afi.afiliadoId}:${origemEvento || tipoEvento}:${tipoEvento}:${referenciaId ?? `user-${usuarioId}`}`;
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${eventKey}, 0))`);
+
+      if (referenciaId != null) {
+        const existing = (await tx.execute(sql`
+          SELECT id FROM afiliado_comissoes
+          WHERE event_key = ${eventKey}
+          LIMIT 1
+        `)).rows as any[];
+        if (existing.length) return;
+      }
+
+      let indicado = (await tx.execute(sql`
+        SELECT id FROM afiliado_indicacoes
+        WHERE afiliado_id = ${afi.afiliadoId}
+          AND (
+            usuario_indicado_id = ${usuarioId}
+            OR (${u[0]?.email ?? null} IS NOT NULL AND LOWER(email_indicado) = LOWER(${u[0]?.email ?? null}))
+          )
+        ORDER BY id DESC
+        LIMIT 1
+      `)).rows as any[];
+
+      if (!indicado.length) {
+        indicado = (await tx.execute(sql`
+          INSERT INTO afiliado_indicacoes
+            (afiliado_id, usuario_indicado_id, nome_indicado, email_indicado, tipo_indicado, status)
+          VALUES
+            (${afi.afiliadoId}, ${usuarioId}, ${u[0]?.nome ?? null}, ${u[0]?.email ?? null}, 'usuario', 'ativo')
+          RETURNING id
+        `)).rows as any[];
+        await tx.execute(sql`
+          UPDATE afiliados SET total_indicados = total_indicados + 1
+          WHERE id = ${afi.afiliadoId}
+        `);
+      }
+
+      await tx.execute(sql`
+        INSERT INTO afiliado_comissoes
+          (afiliado_id, indicado_id, tipo_evento, valor_transacao, percentual,
+           valor_comissao, status, referencia_id, descricao, event_key)
+        VALUES
+          (${afi.afiliadoId}, ${indicado[0].id}, ${tipoEvento}, ${valorNum}, ${pct},
+           ${valorComissao}, 'aprovado', ${referenciaId ?? null}, ${descricao ?? null},
+           ${referenciaId != null ? eventKey : null})
+      `);
+
+      await tx.execute(sql`
+        UPDATE afiliados SET
+          saldo = saldo + ${valorComissao},
+          total_ganhos = total_ganhos + ${valorComissao},
+          total_comissoes = total_comissoes + 1
+        WHERE id = ${afi.afiliadoId}
+      `);
+    });
   } catch (err) {
     console.error("[comissaoAfiliado] erro:", err);
   }

@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
+import { decodeClienteTokenFromReq, gerarComissaoCliente } from "../lib/comissaoAfiliado";
+import { verifyPdvFinancialToken } from "../lib/pdvFinancialAuth";
 
 const router = Router();
 
@@ -500,6 +502,19 @@ router.put("/agendamentos/:id/status", async (req, res) => {
     );
     const row = rows(r)[0];
     if (!row) return res.status(404).json({ error: "not_found" });
+
+    // O mesmo evento/referência do pagamento torna o gatilho idempotente quando
+    // um serviço é concluído e pago em chamadas distintas.
+    if (status === "concluido" && Number(row.valor_pago) > 0 && row.pago_em && verifyPdvFinancialToken(req)) {
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioTelefone: row.cliente_telefone,
+        valor: Number(row.valor_pago ?? row.valor),
+        tipoEvento: "servico",
+        referenciaId: Number(row.id),
+        descricao: `Serviço concluído #${row.id}`,
+      });
+    }
     return res.json(row);
   } catch (err) {
     console.error(err);
@@ -510,6 +525,7 @@ router.put("/agendamentos/:id/status", async (req, res) => {
 // Registrar pagamento direto → calcula 3% comissão GoTaxi → atualiza repasse
 router.post("/agendamentos/:id/pagar", async (req, res) => {
   try {
+    if (!verifyPdvFinancialToken(req)) return res.status(401).json({ error: "unauthorized" });
     const empresaId = getEmpresaId(req);
     const { valor_pago, metodo_pagamento = "pix" } = req.body;
     if (!valor_pago || Number(valor_pago) <= 0) return res.status(400).json({ error: "valor_pago obrigatório" });
@@ -531,6 +547,14 @@ router.post("/agendamentos/:id/pagar", async (req, res) => {
     if (!row) return res.status(404).json({ error: "not_found" });
 
     await atualizarRepasse(empresaId);
+    await gerarComissaoCliente({
+      usuarioId: decodeClienteTokenFromReq(req),
+      usuarioTelefone: row.cliente_telefone,
+      valor: Number(row.valor_pago),
+      tipoEvento: "servico",
+      referenciaId: Number(row.id),
+      descricao: `Serviço pago #${row.id}`,
+    });
 
     return res.json({
       agendamento: row,

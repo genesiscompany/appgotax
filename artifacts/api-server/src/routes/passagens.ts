@@ -1,9 +1,15 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request } from "express";
 import { db } from "@workspace/db";
 import { rotasTable, reservasTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
+import { decodeClienteTokenFromReq, gerarComissaoCliente } from "../lib/comissaoAfiliado";
+import { verifyPdvFinancialToken } from "../lib/pdvFinancialAuth";
 
 const router: IRouter = Router();
+
+function getAuthenticatedEmpresaId(req: Request): number | null {
+  return verifyPdvFinancialToken(req)?.empresaId ?? null;
+}
 
 router.get("/rotas", async (req, res) => {
   const empresaId = Number(req.headers["x-empresa-id"] || 1);
@@ -58,6 +64,41 @@ router.post("/reservas", async (req, res) => {
       status: "pendente",
     }).returning();
     return res.status(201).json({ ...reserva, criadoEm: reserva.criadoEm.toISOString() });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "server_error", message: "Erro interno" });
+  }
+});
+
+router.patch("/reservas/:id/status", async (req, res) => {
+  try {
+    const empresaId = getAuthenticatedEmpresaId(req);
+    if (!empresaId) return res.status(401).json({ error: "unauthorized" });
+    const reservaId = Number(req.params.id);
+    const status = String(req.body.status || "");
+    const permitidos = ["pendente", "confirmada", "concluida", "cancelada"];
+    if (!permitidos.includes(status)) return res.status(400).json({ error: "invalid_status" });
+
+    const [anterior] = await db.select().from(reservasTable)
+      .where(eq(reservasTable.id, reservaId)).limit(1);
+    if (!anterior || anterior.empresaId !== empresaId) return res.status(404).json({ error: "not_found" });
+
+    const [reserva] = await db.update(reservasTable).set({ status })
+      .where(eq(reservasTable.id, reservaId)).returning();
+
+    if (["confirmada", "concluida"].includes(status)) {
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioEmail: req.body.passageiroEmail ?? req.body.passageiro_email ?? null,
+        usuarioTelefone: reserva.passageiroTelefone,
+        valor: reserva.total,
+        tipoEvento: "reserva_passagem",
+        referenciaId: reserva.id,
+        descricao: `Reserva de passagem #${reserva.id}`,
+      });
+    }
+
+    return res.json({ ...reserva, criadoEm: reserva.criadoEm.toISOString() });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "server_error", message: "Erro interno" });

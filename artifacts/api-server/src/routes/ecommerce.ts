@@ -4,8 +4,14 @@ import { produtosTable, pedidosTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import jwt from "jsonwebtoken";
+import { decodeClienteTokenFromReq, gerarComissaoCliente } from "../lib/comissaoAfiliado";
+import { verifyPdvFinancialToken } from "../lib/pdvFinancialAuth";
 
 const JWT_SECRET = process.env["JWT_SECRET"] || "gotaxi-admin-secret-2024";
+
+function getAuthenticatedEmpresaId(req: Request): number | null {
+  return verifyPdvFinancialToken(req)?.empresaId ?? null;
+}
 
 function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   const auth = req.headers.authorization;
@@ -87,6 +93,42 @@ router.post("/pedidos", async (req, res) => {
       status: "pendente",
     }).returning();
     return res.status(201).json({ ...pedido, criadoEm: pedido.criadoEm.toISOString() });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "server_error", message: "Erro interno" });
+  }
+});
+
+router.patch("/pedidos/:id/status", async (req, res) => {
+  try {
+    const empresaId = getAuthenticatedEmpresaId(req);
+    if (!empresaId) return res.status(401).json({ error: "unauthorized" });
+    const pedidoId = Number(req.params.id);
+    const status = String(req.body.status || "");
+    const permitidos = ["pendente", "processando", "enviado", "entregue", "cancelado"];
+    if (!permitidos.includes(status)) return res.status(400).json({ error: "invalid_status" });
+
+    const [anterior] = await db.select().from(pedidosTable)
+      .where(eq(pedidosTable.id, pedidoId)).limit(1);
+    if (!anterior || anterior.empresaId !== empresaId) return res.status(404).json({ error: "not_found" });
+
+    const [pedido] = await db.update(pedidosTable).set({ status })
+      .where(eq(pedidosTable.id, pedidoId)).returning();
+
+    if (status === "entregue") {
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioEmail: req.body.clienteEmail ?? req.body.cliente_email ?? null,
+        usuarioTelefone: pedido.clienteTelefone,
+        valor: pedido.total,
+        tipoEvento: "pedido_ecommerce",
+        origemEvento: "pedidos",
+        referenciaId: pedido.id,
+        descricao: `Pedido ecommerce #${pedido.id}`,
+      });
+    }
+
+    return res.json({ ...pedido, criadoEm: pedido.criadoEm.toISOString() });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "server_error", message: "Erro interno" });

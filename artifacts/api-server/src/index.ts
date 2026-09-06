@@ -138,6 +138,26 @@ async function runStartupMigrations() {
     `ALTER TABLE afiliado_indicacoes ADD COLUMN IF NOT EXISTS tipo_indicado VARCHAR(20) DEFAULT 'usuario'`,
     `ALTER TABLE afiliado_indicacoes ADD COLUMN IF NOT EXISTS tipo_dispositivo VARCHAR(20)`,
     `ALTER TABLE afiliado_indicacoes ADD COLUMN IF NOT EXISTS email_indicado VARCHAR(255)`,
+    `ALTER TABLE afiliado_indicacoes ADD COLUMN IF NOT EXISTS usuario_indicado_id INTEGER REFERENCES usuarios(id)`,
+    `ALTER TABLE afiliado_comissoes ADD COLUMN IF NOT EXISTS event_key VARCHAR(180)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS afiliado_comissoes_event_key_unique
+       ON afiliado_comissoes(event_key) WHERE event_key IS NOT NULL`,
+    `WITH aprovadas AS (
+       UPDATE afiliado_comissoes
+       SET status = 'aprovado'
+       WHERE status = 'pendente'
+       RETURNING afiliado_id, valor_comissao
+     ), totais AS (
+       SELECT afiliado_id, COUNT(*) AS quantidade, SUM(valor_comissao) AS valor
+       FROM aprovadas
+       GROUP BY afiliado_id
+     )
+     UPDATE afiliados a SET
+       saldo = a.saldo + t.valor,
+       total_ganhos = a.total_ganhos + t.valor,
+       total_comissoes = a.total_comissoes + t.quantidade
+     FROM totais t
+     WHERE a.id = t.afiliado_id`,
     `ALTER TABLE afiliado_resgates ADD COLUMN IF NOT EXISTS processado_em TIMESTAMP`,
     `ALTER TABLE afiliado_resgates ADD COLUMN IF NOT EXISTS processado_por VARCHAR(100)`,
     `ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS afiliado_origem_codigo VARCHAR(20)`,

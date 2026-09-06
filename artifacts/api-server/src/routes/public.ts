@@ -320,21 +320,6 @@ router.post("/ecommerce/pedido", async (req, res) => {
       console.error("[ecommerce/pedido] mirror to pedidos_pdv failed", mirrorErr);
     }
 
-    // Generate affiliate commission for the logged-in customer (if referred)
-    try {
-      const { gerarComissaoCliente, decodeClienteTokenFromReq } = await import("../lib/comissaoAfiliado");
-      const usuarioId = decodeClienteTokenFromReq(req);
-      await gerarComissaoCliente({
-        usuarioId,
-        valor: Number(total) || 0,
-        tipoEvento: "pedido_ecommerce",
-        referenciaId: Number(pedido.id),
-        descricao: `Pedido ecommerce #${pedido.id}`,
-      });
-    } catch (commErr) {
-      console.error("[ecommerce/pedido] comissão erro:", commErr);
-    }
-
     return res.status(201).json({ id: pedido.id, status: pedido.status });
   } catch (err) {
     console.error("[ecommerce/pedido]", err);
@@ -432,20 +417,6 @@ router.post("/servicos/agendar", async (req, res) => {
     `);
     const agendamento = (row.rows as any[])[0];
     if (!agendamento) return res.status(500).json({ error: "server_error" });
-
-    try {
-      const { gerarComissaoCliente, decodeClienteTokenFromReq } = await import("../lib/comissaoAfiliado");
-      const usuarioId = decodeClienteTokenFromReq(req);
-      await gerarComissaoCliente({
-        usuarioId,
-        valor: Number(valor) || 0,
-        tipoEvento: "agendamento_servico",
-        referenciaId: Number(agendamento.id),
-        descricao: `Agendamento ${servicoNome} #${agendamento.id}`,
-      });
-    } catch (commErr) {
-      console.error("[servicos/agendar] comissão erro:", commErr);
-    }
 
     return res.status(201).json({ id: agendamento.id, status: agendamento.status });
   } catch (err) {
@@ -646,9 +617,11 @@ router.post("/caronas/:id/reservas", async (req, res) => {
       INSERT INTO carona_reservas (carona_id, passageiro_nome, passageiro_telefone, passageiro_cpf, parada_embarque, parada_desembarque, valor, forma_pagamento, observacoes)
       VALUES (${cId}, '${safeStr(passageiro_nome)}', '${safeStr(passageiro_telefone)}', '${safeStr(passageiro_cpf)}',
               '${safeStr(parada_embarque)}', '${safeStr(parada_desembarque)}', ${valorFinal},
-              '${safeStr(forma_pagamento || "pix")}', '${safeStr(observacoes)}')
+               '${safeStr(forma_pagamento || "pix")}', '${safeStr(observacoes)}')
       RETURNING *`);
-    return res.json((row.rows as any[])[0]);
+    const reserva = (row.rows as any[])[0];
+    await db.execute(`UPDATE carona_reservas SET status='pendente' WHERE id=${Number(reserva?.id)}`);
+    return res.json({ ...reserva, status: "pendente" });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 

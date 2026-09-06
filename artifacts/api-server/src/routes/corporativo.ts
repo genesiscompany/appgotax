@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { sendFcmNotification } from "./motorista-app";
+import { gerarComissaoCliente } from "../lib/comissaoAfiliado";
 
 const router: Router = Router();
 
@@ -16,6 +17,18 @@ function getEmpresaId(req: any): number | null {
 }
 
 function esc(s: string) { return String(s).replace(/'/g, "''"); }
+
+async function resolveClienteComissao(email?: string | null, telefone?: string | null) {
+  const rows = await db.execute(`
+    SELECT id, email, telefone FROM usuarios
+    WHERE papel = 'cliente' AND (
+      ${email ? `LOWER(email) = '${esc(email.toLowerCase())}'` : "false"}
+      OR ${telefone ? `REGEXP_REPLACE(COALESCE(telefone, ''), '\\D', '', 'g') = '${esc(telefone.replace(/\D/g, ""))}'` : "false"}
+    )
+    LIMIT 1
+  `);
+  return rows.rows[0] as { id: number; email: string | null; telefone: string | null } | undefined;
+}
 
 // ── PIX BR Code (EMV) helper ─────────────────────────────────────────────────
 // Builds a "Copia e Cola" PIX payload (EMV BR Code). Used in /pix-config.
@@ -343,7 +356,19 @@ router.put("/corridas/:id/status", async (req, res) => {
     const extraSet = valor_final ? `, valor_final = ${Number(valor_final)}` : "";
     const r = await db.execute(`UPDATE pro_corridas SET status = '${status}', atualizado_em = now() ${extraSet}
       WHERE id = ${req.params.id} AND empresa_id = ${empresaId} RETURNING *`);
-    return res.json(r.rows[0]);
+    const corrida = r.rows[0] as any;
+    // A confirmação corporativa de conclusão é o único ponto confiável para
+    // creditar a corrida: exige corrida vinculada, valor final e cliente real.
+    if (status === "concluida" && corrida?.corrida_id && Number(corrida.valor_final) > 0) {
+      try {
+        const funcionario = corrida.funcionario_id
+          ? (await db.execute(`SELECT email, telefone FROM pro_funcionarios WHERE id = ${Number(corrida.funcionario_id)} AND empresa_id = ${empresaId} LIMIT 1`)).rows[0] as any
+          : null;
+        const cliente = await resolveClienteComissao(funcionario?.email, funcionario?.telefone || corrida.passageiro_telefone);
+        if (cliente) await gerarComissaoCliente({ usuarioId: cliente.id, usuarioEmail: cliente.email, usuarioTelefone: cliente.telefone, valor: Number(corrida.valor_final), tipoEvento: "corrida", referenciaId: Number(corrida.corrida_id), descricao: `Corrida corporativa #${corrida.id}` });
+      } catch (commErr) { console.error("[corrida/status] comissão erro:", commErr); }
+    }
+    return res.json(corrida);
   } catch (e: any) { return res.status(500).json({ error: e.message }); }
 });
 

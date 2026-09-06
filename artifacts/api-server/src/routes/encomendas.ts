@@ -1,5 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
+import { decodeClienteTokenFromReq, gerarComissaoCliente } from "../lib/comissaoAfiliado";
+import { verifyPdvFinancialToken } from "../lib/pdvFinancialAuth";
 
 const router: IRouter = Router();
 
@@ -183,7 +185,18 @@ router.put("/:id", async (req, res) => {
       UPDATE encomendas SET ${sets.join(", ")} WHERE id=${id} AND empresa_id=${empresaId} RETURNING *
     `);
     if (!row.rows.length) return res.status(404).json({ error: "not_found" });
-    return res.json(row.rows[0]);
+    const encomenda = row.rows[0] as any;
+    if (encomenda.status === "entregue" && verifyPdvFinancialToken(req)) {
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioTelefone: encomenda.cliente_telefone,
+        valor: encomenda.valor_frete,
+        tipoEvento: "encomenda",
+        referenciaId: encomenda.id,
+        descricao: `Encomenda ${encomenda.codigo}`,
+      });
+    }
+    return res.json(encomenda);
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 

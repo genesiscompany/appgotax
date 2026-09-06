@@ -5,7 +5,10 @@ import { eq, desc, and, sql } from "drizzle-orm";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import { uploadImageToGCS } from "../lib/uploadImage";
 import { sendFcmNotification } from "./motorista-app";
+import { decodeClienteTokenFromReq, gerarComissaoCliente } from "../lib/comissaoAfiliado";
+import { createPdvToken, verifyPdvFinancialToken } from "../lib/pdvFinancialAuth";
 
 const uploadsDir = path.resolve(process.cwd(), "uploads/comprovantes");
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -22,16 +25,10 @@ const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 }, fileFil
   cb(null, allowed.includes(file.mimetype));
 }});
 
-const productImagesDir = path.resolve(process.cwd(), "public", "uploads", "produtos");
+const productImagesDir = path.resolve(process.cwd(), "public", "uploads");
 fs.mkdirSync(productImagesDir, { recursive: true });
 const productImageUpload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, productImagesDir),
-    filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname) || ".jpg";
-      cb(null, `produto_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -47,43 +44,7 @@ const router: IRouter = Router();
     await db.execute(sql`ALTER TABLE promocoes_pdv ADD COLUMN IF NOT EXISTS produto_id INTEGER REFERENCES produtos_pdv(id) ON DELETE SET NULL`);
     await db.execute(sql`ALTER TABLE promocoes_pdv ADD COLUMN IF NOT EXISTS preco_promocional NUMERIC(10,2)`);
     await db.execute(sql`ALTER TABLE promocoes_pdv ADD COLUMN IF NOT EXISTS quantidade_disponivel INTEGER`);
-  } catch (e) { console.error("[pdv migrations promocoes]", e); }
-  try {
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS grupos_extras_pdv (
-        id SERIAL PRIMARY KEY,
-        empresa_id INTEGER NOT NULL,
-        nome TEXT NOT NULL,
-        min_selecoes INTEGER NOT NULL DEFAULT 0,
-        max_selecoes INTEGER NOT NULL DEFAULT 1,
-        obrigatorio BOOLEAN NOT NULL DEFAULT false,
-        ordem INTEGER NOT NULL DEFAULT 0,
-        ativo BOOLEAN NOT NULL DEFAULT true,
-        criado_em TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS opcoes_grupo_extras_pdv (
-        id SERIAL PRIMARY KEY,
-        grupo_id INTEGER NOT NULL REFERENCES grupos_extras_pdv(id) ON DELETE CASCADE,
-        nome TEXT NOT NULL,
-        preco_adicional NUMERIC(10,2) NOT NULL DEFAULT 0,
-        ordem INTEGER NOT NULL DEFAULT 0,
-        ativo BOOLEAN NOT NULL DEFAULT true
-      )
-    `);
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS produto_grupos_extras_pdv (
-        produto_id INTEGER NOT NULL REFERENCES produtos_pdv(id) ON DELETE CASCADE,
-        grupo_id INTEGER NOT NULL REFERENCES grupos_extras_pdv(id) ON DELETE CASCADE,
-        ordem INTEGER NOT NULL DEFAULT 0
-      )
-    `);
-    await db.execute(sql`ALTER TABLE produto_grupos_extras_pdv ADD COLUMN IF NOT EXISTS min_selecoes INTEGER`);
-    await db.execute(sql`ALTER TABLE produto_grupos_extras_pdv ADD COLUMN IF NOT EXISTS max_selecoes INTEGER`);
-    await db.execute(sql`ALTER TABLE produto_grupos_extras_pdv ADD COLUMN IF NOT EXISTS obrigatorio BOOLEAN`);
-    await db.execute(sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_pgpe_produto_grupo ON produto_grupos_extras_pdv (produto_id, grupo_id)`);
-  } catch (e) { console.error("[pdv migrations grupos]", e); }
+  } catch (e) { console.error("[pdv migrations]", e); }
 })();
 
 // ── SSE clients map: empresaId → Set<res> ──────────────────────────────────
@@ -156,6 +117,12 @@ function getPdvUserId(req: Request): number | null {
   return null;
 }
 
+function tipoEventoPedidoPdv(modulo: unknown): string {
+  if (modulo === "ecommerce") return "pedido_ecommerce";
+  if (modulo === "food") return "pedido_food";
+  return "pedido_pdv";
+}
+
 // ── POST /api/pdv/login ─────────────────────────────────────────────────────
 router.post("/login", async (req, res) => {
   try {
@@ -174,7 +141,7 @@ router.post("/login", async (req, res) => {
     }
 
     const [empresa] = await db.select().from(empresasTable).where(eq(empresasTable.id, usuario.empresaId)).limit(1);
-    const token = Buffer.from(`${usuario.id}:${usuario.empresaId}:${Date.now()}`).toString("base64");
+    const token = createPdvToken(usuario.id, Number(usuario.empresaId));
     const referralRow = (await db.execute(sql`
       SELECT u.codigo_referral, EXISTS(SELECT 1 FROM afiliados a WHERE a.usuario_id = u.id) AS is_afiliado
       FROM usuarios u WHERE u.id = ${usuario.id}
@@ -382,6 +349,21 @@ router.patch("/pedidos/:id/status", async (req, res) => {
         const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
         await upsertRepasseEmpresa(empresaId, monday.toISOString().split("T")[0], sunday.toISOString().split("T")[0], taxa);
       } catch { /* non-critical — don't fail the request */ }
+
+      // A entrega é o evento econômico final: pedidos "novo" podem ser
+      // cancelados e, portanto, não geram comissão na sua criação.
+      if (verifyPdvFinancialToken(req)) {
+        await gerarComissaoCliente({
+          usuarioId: decodeClienteTokenFromReq(req),
+          usuarioEmail: req.body.clienteEmail ?? req.body.cliente_email ?? null,
+          usuarioTelefone: pedido.cliente_whatsapp,
+          valor: Number(pedido.total),
+          tipoEvento: tipoEventoPedidoPdv(pedido.modulo),
+          origemEvento: "pedidos_pdv",
+          referenciaId: Number(pedido.id),
+          descricao: `Pedido ${pedido.modulo} #${pedido.id}`,
+        });
+      }
     }
 
     broadcastToEmpresa(empresaId, { event: "status_atualizado", pedidoId: id, status });
@@ -700,42 +682,34 @@ router.delete("/grupos/opcoes/:id", async (req, res) => {
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
-// Buscar grupos vinculados a um produto (com overrides por produto)
+// Buscar grupos vinculados a um produto
 router.get("/produtos/:id/grupos", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
     const produtoId = Number(req.params.id);
     const result = await db.execute(
-      `SELECT pg.grupo_id as id, pg.min_selecoes, pg.max_selecoes, pg.obrigatorio
-       FROM produto_grupos_extras_pdv pg
+      `SELECT pg.grupo_id as id FROM produto_grupos_extras_pdv pg
        JOIN grupos_extras_pdv g ON g.id = pg.grupo_id
        WHERE pg.produto_id = ${produtoId} AND g.empresa_id = ${empresaId}
        ORDER BY pg.ordem, pg.grupo_id`
     );
-    return res.json(result.rows);
+    return res.json((result.rows as any[]).map(r => r.id));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
-// Vincular grupos a produto (com overrides individuais por produto)
+// Vincular grupos a produto
 router.put("/produtos/:id/grupos", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
     const produtoId = Number(req.params.id);
-    const { grupoIds, overrides } = req.body;
+    const { grupoIds } = req.body;
     await db.execute(`DELETE FROM produto_grupos_extras_pdv WHERE produto_id = ${produtoId}`);
     if (Array.isArray(grupoIds)) {
       for (let i = 0; i < grupoIds.length; i++) {
-        const gid = Number(grupoIds[i]);
-        const ov = (overrides && overrides[String(gid)]) ? overrides[String(gid)] : {};
-        const min = ov.min_selecoes !== undefined ? Number(ov.min_selecoes) : "NULL";
-        const max = ov.max_selecoes !== undefined ? Number(ov.max_selecoes) : "NULL";
-        const obrig = ov.obrigatorio !== undefined ? (ov.obrigatorio ? "true" : "false") : "NULL";
         await db.execute(
-          `INSERT INTO produto_grupos_extras_pdv (produto_id, grupo_id, ordem, min_selecoes, max_selecoes, obrigatorio)
-           VALUES (${produtoId}, ${gid}, ${i}, ${min}, ${max}, ${obrig}) ON CONFLICT (produto_id, grupo_id) DO UPDATE
-           SET ordem = ${i}, min_selecoes = ${min}, max_selecoes = ${max}, obrigatorio = ${obrig}`
+          `INSERT INTO produto_grupos_extras_pdv (produto_id, grupo_id, ordem) VALUES (${produtoId}, ${Number(grupoIds[i])}, ${i}) ON CONFLICT DO NOTHING`
         );
       }
     }
@@ -802,7 +776,7 @@ router.post("/produtos/:id/imagem", productImageUpload.single("imagem"), async (
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
     const file = (req as any).file;
     if (!file) return res.status(400).json({ error: "no_file", message: "Nenhum ficheiro enviado" });
-    const imageUrl = `/uploads/produtos/${file.filename}`;
+    const imageUrl = await uploadImageToGCS(file.buffer, file.originalname, "produtos");
     await db.execute(`UPDATE produtos_pdv SET imagem = '${imageUrl}' WHERE id = ${Number(req.params.id)} AND empresa_id = ${empresaId}`);
     return res.json({ imagem: imageUrl });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
@@ -1289,10 +1263,29 @@ router.post("/calcular-frete", async (req, res) => {
 router.get("/maps-key", (req, res) => {
   const empresaId = getEmpresaId(req);
   if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-  // GOOGLE_MAPS_WEB_KEY é a chave configurada para uso em browser (HTTP referrer)
-  // Fallback para GOOGLE_MAPS_KEY se a web key não estiver definida
-  const key = process.env.GOOGLE_MAPS_WEB_KEY || process.env.GOOGLE_MAPS_KEY || "";
-  return res.json({ key });
+  return res.json({ key: process.env.GOOGLE_MAPS_KEY || "" });
+});
+
+// ── Loja aberta / fechada ─────────────────────────────────────────────────
+router.get("/restaurante/aberto", async (req, res) => {
+  try {
+    const empresaId = getEmpresaId(req);
+    if (!empresaId) return res.status(401).json({ error: "unauthorized" });
+    const rows = await db.execute(sql`SELECT aberto FROM restaurantes WHERE empresa_id = ${empresaId} LIMIT 1`);
+    const aberto = (rows.rows[0] as any)?.aberto ?? true;
+    return res.json({ aberto });
+  } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
+});
+
+router.patch("/restaurante/aberto", async (req, res) => {
+  try {
+    const empresaId = getEmpresaId(req);
+    if (!empresaId) return res.status(401).json({ error: "unauthorized" });
+    const { aberto } = req.body;
+    if (typeof aberto !== "boolean") return res.status(400).json({ error: "aberto must be boolean" });
+    await db.execute(sql`UPDATE restaurantes SET aberto = ${aberto} WHERE empresa_id = ${empresaId}`);
+    return res.json({ ok: true, aberto });
+  } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
 // ── Timeline: Config do restaurante (lat/lng) ─────────────────────────────
@@ -1887,6 +1880,7 @@ router.post("/viagens/passagens", async (req, res) => {
       VALUES (${empresaId},${clienteVal},${Number(horario_id)},${assentoVal},${Number(valor)},'${fpSafe}','${statusSafe}',${obsVal},${opVal})
       RETURNING *
     `);
+    const passagem = rows.rows[0] as any;
     if (horario_id) await db.execute(`UPDATE viagens_horarios SET vagas_ocupadas=vagas_ocupadas+1 WHERE id=${Number(horario_id)}`);
     // Recalcula repasse da semana com a nova passagem (Tur Viagens)
     if (statusSafe === "confirmado") {
@@ -1903,7 +1897,22 @@ router.post("/viagens/passagens", async (req, res) => {
         await upsertRepasseEmpresa(empresaId, semanaInicio, semanaFim, taxa);
       } catch (e) { console.error("[passagens pdv] repasse erro:", e); }
     }
-    return res.status(201).json(rows.rows[0]);
+    if (passagem?.status === "confirmado" && verifyPdvFinancialToken(req)) {
+      const cliente = passagem.cliente_id
+        ? (await db.execute(`SELECT email, telefone FROM viagens_clientes WHERE id=${Number(passagem.cliente_id)} AND empresa_id=${empresaId}`)).rows[0] as any
+        : null;
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioEmail: cliente?.email ?? req.body.clienteEmail ?? req.body.cliente_email ?? null,
+        usuarioTelefone: cliente?.telefone ?? req.body.clienteTelefone ?? req.body.cliente_telefone ?? null,
+        valor: Number(passagem.valor),
+        tipoEvento: "passagem_pdv",
+        origemEvento: "viagens_passagens",
+        referenciaId: Number(passagem.id),
+        descricao: `Passagem PDV #${passagem.id}`,
+      });
+    }
+    return res.status(201).json(passagem);
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1922,6 +1931,8 @@ router.put("/viagens/passagens/:id", async (req, res) => {
     if (!sets.length) return res.status(400).json({ error: "nothing" });
     const [old] = (await db.execute(`SELECT status, horario_id FROM viagens_passagens WHERE id=${Number(req.params.id)} AND empresa_id=${empresaId}`)).rows as any[];
     const rows = await db.execute(`UPDATE viagens_passagens SET ${sets.join(",")} WHERE id=${Number(req.params.id)} AND empresa_id=${empresaId} RETURNING *`);
+    const passagem = rows.rows[0] as any;
+    if (!passagem) return res.status(404).json({ error: "not_found" });
     // Ajusta vagas se cancelar
     if (statusSafe === "cancelado" && old?.status !== "cancelado" && old?.horario_id) {
       await db.execute(`UPDATE viagens_horarios SET vagas_ocupadas=GREATEST(vagas_ocupadas-1,0) WHERE id=${old.horario_id}`);
@@ -1939,7 +1950,22 @@ router.put("/viagens/passagens/:id", async (req, res) => {
         await upsertRepasseEmpresa(empresaId, monday.toISOString().slice(0,10), sunday.toISOString().slice(0,10), taxa);
       } catch (e) { console.error("[passagens pdv PUT] repasse erro:", e); }
     }
-    return res.json(rows.rows[0]);
+    if (statusSafe === "confirmado" && old?.status !== "confirmado" && verifyPdvFinancialToken(req)) {
+      const cliente = passagem.cliente_id
+        ? (await db.execute(`SELECT email, telefone FROM viagens_clientes WHERE id=${Number(passagem.cliente_id)} AND empresa_id=${empresaId}`)).rows[0] as any
+        : null;
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioEmail: cliente?.email ?? req.body.clienteEmail ?? req.body.cliente_email ?? null,
+        usuarioTelefone: cliente?.telefone ?? req.body.clienteTelefone ?? req.body.cliente_telefone ?? null,
+        valor: Number(passagem.valor),
+        tipoEvento: "passagem_pdv",
+        origemEvento: "viagens_passagens",
+        referenciaId: Number(passagem.id),
+        descricao: `Passagem PDV #${passagem.id}`,
+      });
+    }
+    return res.json(passagem);
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1990,9 +2016,13 @@ router.get("/config-pix", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const rows = await db.execute(`SELECT chave_pix, tipo_chave_pix FROM empresas WHERE id = ${empresaId} LIMIT 1`);
+    const rows = await db.execute(`SELECT chave_pix, tipo_chave_pix, numero_conta_mercado_pago FROM empresas WHERE id = ${empresaId} LIMIT 1`);
     const emp = rows.rows[0] as any ?? {};
-    return res.json({ chave_pix: emp.chave_pix ?? "", tipo_chave_pix: emp.tipo_chave_pix ?? "aleatoria" });
+    return res.json({
+      chave_pix: emp.chave_pix ?? "",
+      tipo_chave_pix: emp.tipo_chave_pix ?? "aleatoria",
+      numero_conta_mercado_pago: emp.numero_conta_mercado_pago ?? "",
+    });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -2001,14 +2031,21 @@ router.put("/config-pix", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const { chave_pix, tipo_chave_pix } = req.body;
+    const { chave_pix, tipo_chave_pix, numero_conta_mercado_pago } = req.body;
     const ALLOWED_TIPOS = ["cpf", "cnpj", "email", "telefone", "aleatoria"];
     const tipo = ALLOWED_TIPOS.includes(tipo_chave_pix) ? tipo_chave_pix : "aleatoria";
-    const chave = String(chave_pix ?? "").replace(/'/g, "''");
+    const safe = (value: unknown) => String(value ?? "").replace(/'/g, "''");
+    const sets = [`chave_pix = '${safe(chave_pix)}'`, `tipo_chave_pix = '${tipo}'`];
+    if (numero_conta_mercado_pago !== undefined) sets.push(`numero_conta_mercado_pago = '${safe(numero_conta_mercado_pago)}'`);
     await db.execute(`
-      UPDATE empresas SET chave_pix = '${chave}', tipo_chave_pix = '${tipo}' WHERE id = ${empresaId}
+      UPDATE empresas SET ${sets.join(", ")} WHERE id = ${empresaId}
     `);
-    return res.json({ ok: true, chave_pix: chave, tipo_chave_pix: tipo });
+    return res.json({
+      ok: true,
+      chave_pix: String(chave_pix ?? ""),
+      tipo_chave_pix: tipo,
+      numero_conta_mercado_pago: String(numero_conta_mercado_pago ?? ""),
+    });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -2018,7 +2055,7 @@ router.get("/perfil", async (req, res) => {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
     const [emp, rest] = await Promise.all([
-      db.execute(`SELECT nome, telefone, cnpj, logo FROM empresas WHERE id = ${empresaId} LIMIT 1`),
+      db.execute(`SELECT nome, telefone, cnpj FROM empresas WHERE id = ${empresaId} LIMIT 1`),
       db.execute(`SELECT nome, categoria, descricao FROM restaurantes WHERE empresa_id = ${empresaId} LIMIT 1`),
     ]);
     const e = (emp.rows[0] as any) ?? {};
@@ -2029,7 +2066,6 @@ router.get("/perfil", async (req, res) => {
       descricao: r.descricao ?? "",
       telefone: e.telefone ?? "",
       cnpj: e.cnpj ?? "",
-      logo: e.logo ?? "",
     });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
@@ -2039,11 +2075,10 @@ router.put("/perfil", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const { nome, categoria, descricao, telefone, cnpj, logo } = req.body;
+    const { nome, categoria, descricao, telefone, cnpj } = req.body;
     const safe = (v: unknown) => String(v ?? "").replace(/'/g, "''");
 
-    const logoSet = logo !== undefined ? `, logo = ${logo ? `'${safe(logo)}'` : "NULL"}` : "";
-    await db.execute(`UPDATE empresas SET nome = '${safe(nome)}', telefone = '${safe(telefone)}', cnpj = '${safe(cnpj)}'${logoSet} WHERE id = ${empresaId}`);
+    await db.execute(`UPDATE empresas SET nome = '${safe(nome)}', telefone = '${safe(telefone)}', cnpj = '${safe(cnpj)}' WHERE id = ${empresaId}`);
 
     const existing = await db.execute(`SELECT id FROM restaurantes WHERE empresa_id = ${empresaId} LIMIT 1`);
     if ((existing.rows as any[]).length > 0) {
@@ -2052,47 +2087,7 @@ router.put("/perfil", async (req, res) => {
       await db.execute(`INSERT INTO restaurantes (empresa_id, nome, categoria, descricao, aberto) VALUES (${empresaId}, '${safe(nome)}', '${safe(categoria)}', '${safe(descricao)}', true)`);
     }
 
-    return res.json({ ok: true, nome: safe(nome), categoria: safe(categoria), descricao: safe(descricao), telefone: safe(telefone), cnpj: safe(cnpj), logo: logo ?? "" });
-  } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
-});
-
-// ── POST /api/pdv/perfil/imagem ──────────────────────────────────────────────
-// Upload da foto/logo da empresa (exibida nos cards do app mobile)
-const empresaImagesDir = path.resolve(process.cwd(), "public", "uploads", "empresas");
-fs.mkdirSync(empresaImagesDir, { recursive: true });
-const empresaImageUpload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, empresaImagesDir),
-    filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname) || ".jpg";
-      cb(null, `empresa_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
-    },
-  }),
-  limits: { fileSize: 8 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-    cb(null, allowed.includes(file.mimetype));
-  },
-});
-router.post("/perfil/imagem", empresaImageUpload.single("imagem"), async (req, res) => {
-  try {
-    const empresaId = getEmpresaId(req);
-    if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const file = (req as any).file;
-    if (!file) return res.status(400).json({ error: "no_file", message: "Nenhum ficheiro enviado" });
-    const imageUrl = `/uploads/empresas/${file.filename}`;
-    await db.execute(`UPDATE empresas SET logo = '${imageUrl}' WHERE id = ${empresaId}`);
-    return res.json({ logo: imageUrl });
-  } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
-});
-
-// ── DELETE /api/pdv/perfil/imagem ────────────────────────────────────────────
-router.delete("/perfil/imagem", async (req, res) => {
-  try {
-    const empresaId = getEmpresaId(req);
-    if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    await db.execute(`UPDATE empresas SET logo = NULL WHERE id = ${empresaId}`);
-    return res.json({ ok: true });
+    return res.json({ ok: true, nome: safe(nome), categoria: safe(categoria), descricao: safe(descricao), telefone: safe(telefone), cnpj: safe(cnpj) });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -2264,7 +2259,20 @@ router.post("/viagens/caronas/:id/reservas", async (req, res) => {
       VALUES (${cId}, '${safe(passageiro_nome)}', '${safe(passageiro_telefone)}', '${safe(passageiro_cpf)}',
               '${safe(parada_embarque)}', '${safe(parada_desembarque)}', ${num(valor, 0)}, '${safe(forma_pagamento || "pix")}', '${safe(observacoes)}')
       RETURNING *`);
-    return res.json((row.rows as any[])[0]);
+    const reserva = (row.rows as any[])[0];
+    if (reserva?.status === "confirmada" && verifyPdvFinancialToken(req)) {
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioEmail: req.body.passageiroEmail ?? req.body.passageiro_email ?? null,
+        usuarioTelefone: reserva.passageiro_telefone,
+        valor: Number(reserva.valor),
+        tipoEvento: "reserva_carona_pdv",
+        origemEvento: "carona_reservas",
+        referenciaId: Number(reserva.id),
+        descricao: `Reserva de carona #${reserva.id}`,
+      });
+    }
+    return res.json(reserva);
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -2277,16 +2285,31 @@ router.patch("/viagens/caronas/:id/reservas/:rid/status", async (req, res) => {
     const cId = Number(req.params.id);
     // Garante que a reserva pertence a uma carona da empresa do token.
     const prev = await db.execute(`
-      SELECT r.status FROM carona_reservas r
+      SELECT r.status, r.valor, r.passageiro_telefone FROM carona_reservas r
       JOIN caronas c ON c.id = r.carona_id
       WHERE r.id=${rId} AND r.carona_id=${cId} AND c.empresa_id=${empresaId}`);
     if ((prev.rows as any[]).length === 0) return res.status(404).json({ error: "reserva_not_found" });
     const prevStatus = (prev.rows as any[])[0]?.status;
-    await db.execute(`
+    const updated = await db.execute(`
       UPDATE carona_reservas SET status='${safe(status)}'
-      WHERE id=${rId} AND carona_id IN (SELECT id FROM caronas WHERE id=${cId} AND empresa_id=${empresaId})`);
+      WHERE id=${rId} AND carona_id IN (SELECT id FROM caronas WHERE id=${cId} AND empresa_id=${empresaId})
+      RETURNING *`);
+    const reserva = (updated.rows as any[])[0];
+    if (!reserva) return res.status(404).json({ error: "reserva_not_found" });
     if (prevStatus === "confirmada" && status === "cancelada") {
       await db.execute(`UPDATE caronas SET vagas_ocupadas = GREATEST(0, vagas_ocupadas - 1) WHERE id=${cId} AND empresa_id=${empresaId}`);
+    }
+    if (status === "confirmada" && verifyPdvFinancialToken(req)) {
+      await gerarComissaoCliente({
+        usuarioId: decodeClienteTokenFromReq(req),
+        usuarioEmail: req.body.passageiroEmail ?? req.body.passageiro_email ?? null,
+        usuarioTelefone: reserva.passageiro_telefone,
+        valor: Number(reserva.valor),
+        tipoEvento: "reserva_carona_pdv",
+        origemEvento: "carona_reservas",
+        referenciaId: Number(reserva.id),
+        descricao: `Reserva de carona #${reserva.id}`,
+      });
     }
     return res.json({ ok: true });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
