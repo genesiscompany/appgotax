@@ -61,14 +61,6 @@ interface PlaceSugestao {
   lng?: number;
 }
 
-function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-}
-
 function calcPrecoCategoria(cat: Categoria, km: number): number {
   if (km <= 3) return Number(cat.taxa_minima);
   return Math.round(cat.taxa_por_km * km * 100) / 100;
@@ -115,6 +107,10 @@ export default function ClienteMotorista() {
   const [catLoading, setCatLoading] = useState(true);
   const [catSel, setCatSel] = useState<number | null>(null);
   const [distanciaKm, setDistanciaKm] = useState(0);
+  const [distanciaCobradaKm, setDistanciaCobradaKm] = useState(0);
+  const [estimativaValor, setEstimativaValor] = useState<number | null>(null);
+  const [estimativaIndisponivel, setEstimativaIndisponivel] = useState(false);
+  const [estimativaLoading, setEstimativaLoading] = useState(false);
   const [pagamento, setPagamento] = useState<PaymentChoice>("dinheiro");
   const [paymentOptions, setPaymentOptions] = useState<PaymentOptions>({
     receber_direto: true, mercado_pago: false, carteira: false, beta: false, sandbox: false,
@@ -221,21 +217,10 @@ export default function ClienteMotorista() {
   }, [customer?.token]);
 
   const catSelecionada = categorias.find(c => c.id === catSel) ?? null;
-  const distanciaAtePassageiroKm = motoristasDisponiveis.reduce((menor, motorista) => {
-    const km = haversineKm(
-      Number(motorista.lat),
-      Number(motorista.lng),
-      origemLatLng.lat,
-      origemLatLng.lng,
-    );
-    return Number.isFinite(km) ? Math.min(menor, km) : menor;
-  }, Number.POSITIVE_INFINITY);
-  const distanciaCobradaKm = Math.round((
-    distanciaKm + (Number.isFinite(distanciaAtePassageiroKm) ? distanciaAtePassageiroKm : 0)
-  ) * 100) / 100;
-  const precoEstimado = catSelecionada && distanciaCobradaKm > 0
-    ? calcPrecoCategoria(catSelecionada, distanciaCobradaKm)
-    : catSelecionada?.taxa_minima ?? 0;
+  const precoEstimado = estimativaValor
+    ?? (catSelecionada && distanciaCobradaKm > 0
+      ? calcPrecoCategoria(catSelecionada, distanciaCobradaKm)
+      : catSelecionada?.taxa_minima ?? 0);
   const preco = corridaData?.valor != null ? Number(corridaData.valor) : precoEstimado;
   const tipoNome = catSelecionada?.nome ?? "Selecione o tipo";
 
@@ -406,15 +391,64 @@ export default function ClienteMotorista() {
     }
   }, [fetchPlaceCoords]);
 
-  // ── Recalculate distance when coordinates change ───────────────────────────────
+  // ── Fetch the same server-side road quote used when the ride is created ────────
   useEffect(() => {
-    if (destinoText) {
-      const km = haversineKm(origemLatLng.lat, origemLatLng.lng, destinoLatLng.lat, destinoLatLng.lng);
-      setDistanciaKm(Math.max(0.1, Math.round(km * 100) / 100));
-    } else {
+    if (!destinoText || !catSelecionada) {
       setDistanciaKm(0);
+      setDistanciaCobradaKm(0);
+      setEstimativaValor(null);
+      setEstimativaIndisponivel(false);
+      return;
     }
-  }, [origemLatLng, destinoLatLng, destinoText]);
+    if (!customer?.token) {
+      setDistanciaKm(0);
+      setDistanciaCobradaKm(0);
+      setEstimativaValor(null);
+      setEstimativaIndisponivel(false);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      setEstimativaLoading(true);
+      try {
+        const response = await fetch(`${API_BASE}/motorista/estimativa`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${customer.token}`,
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            lat_origem: origemLatLng.lat,
+            lng_origem: origemLatLng.lng,
+            lat_destino: destinoLatLng.lat,
+            lng_destino: destinoLatLng.lng,
+            categoria_nome: catSelecionada.nome,
+            payment_source: paymentPayload(pagamento).payment_source,
+          }),
+        });
+        if (!response.ok) throw new Error("quote_unavailable");
+        const quote = await response.json();
+        setDistanciaKm(Number(quote.distancia_viagem_km));
+        setDistanciaCobradaKm(Number(quote.distancia_cobrada_km));
+        setEstimativaValor(Number(quote.valor));
+        setEstimativaIndisponivel(false);
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") {
+          setDistanciaKm(0);
+          setDistanciaCobradaKm(0);
+          setEstimativaValor(null);
+          setEstimativaIndisponivel(true);
+        }
+      } finally {
+        if (!controller.signal.aborted) setEstimativaLoading(false);
+      }
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [origemLatLng, destinoLatLng, destinoText, catSelecionada, pagamento, customer?.token]);
 
   const { requireAuth } = useAuthGate("/cliente/motorista");
 
@@ -1066,7 +1100,12 @@ export default function ClienteMotorista() {
     : pagamento === "wallet"
       ? paymentOptions.carteira
       : paymentOptions.receber_direto;
-  const canChamar = !!destinoText && !!catSel && pagamentoDisponivel;
+  const canChamar = !!destinoText
+    && !!catSel
+    && pagamentoDisponivel
+    && !estimativaLoading
+    && !estimativaIndisponivel
+    && estimativaValor != null;
   const driverMarkers = motoristasDisponiveis.map(m => ({
     lat: m.lat, lng: m.lng,
     label: m.nome.split(" ")[0],
@@ -1180,11 +1219,17 @@ export default function ClienteMotorista() {
         </View>
 
         {/* Distância badge */}
-        {distanciaKm > 0 && (
+        {(distanciaKm > 0 || estimativaLoading || estimativaIndisponivel) && (
           <View style={[styles.distBadge, { backgroundColor: MOD_COLOR + "15" }]}>
-            <Feather name="map" size={12} color={MOD_COLOR} />
+            {estimativaLoading
+              ? <ActivityIndicator size="small" color={MOD_COLOR} />
+              : <Feather name="map" size={12} color={MOD_COLOR} />}
             <Text style={[styles.distText, { color: MOD_COLOR, fontFamily: "Inter_500Medium" }]}>
-              {distanciaKm.toFixed(1)} km estimados
+              {estimativaLoading
+                ? "Calculando rota..."
+                : estimativaIndisponivel
+                  ? "Rota pelas ruas indisponível. Nenhuma corrida será criada."
+                  : `${distanciaCobradaKm.toFixed(1)} km cobrados (aproximação + viagem)`}
             </Text>
           </View>
         )}
@@ -1205,7 +1250,7 @@ export default function ClienteMotorista() {
         ) : (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }} style={{ marginBottom: 14 }}>
             {categorias.map(cat => {
-              const p = cat.id === catSel ? preco : calcPrecoCategoria(cat, distanciaKm);
+              const p = cat.id === catSel ? preco : calcPrecoCategoria(cat, distanciaCobradaKm);
               const sel = catSel === cat.id;
               const icon = getCatIcon(cat.nome);
               return (
@@ -1221,7 +1266,9 @@ export default function ClienteMotorista() {
                     R$ {p.toFixed(2)}
                   </Text>
                   <Text style={[styles.tipoTempo, { color: sel ? "rgba(255,255,255,0.7)" : colors.textMuted, fontFamily: "Inter_400Regular" }]}>
-                    R$ {cat.taxa_por_km.toFixed(2)}/km · mín R$ {cat.taxa_minima.toFixed(0)}
+                    {distanciaCobradaKm <= 3
+                      ? `Tarifa mínima: R$ ${cat.taxa_minima.toFixed(2)} total`
+                      : `R$ ${cat.taxa_por_km.toFixed(2)}/km`}
                   </Text>
                 </Pressable>
               );
@@ -1270,7 +1317,13 @@ export default function ClienteMotorista() {
         >
           <Feather name="navigation" size={20} color={canChamar ? "#fff" : colors.textMuted} />
           <Text style={[styles.chamarBtnText, { color: canChamar ? "#fff" : colors.textMuted, fontFamily: "Inter_700Bold" }]}>
-            {canChamar ? `Chamar ${tipoNome} · R$ ${preco.toFixed(2)}` : "Informe o destino"}
+            {canChamar
+              ? `Chamar ${tipoNome} · R$ ${preco.toFixed(2)}`
+              : estimativaIndisponivel
+                ? "Rota indisponível"
+                : estimativaLoading
+                  ? "Calculando rota..."
+                  : "Informe o destino"}
           </Text>
         </Pressable>
 
