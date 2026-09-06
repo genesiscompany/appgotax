@@ -8,9 +8,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import Colors from "@/constants/colors";
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api` : "/api";
+const MOTORISTA_SESSION_KEY = "@gotaxi_motorista_app_session";
 const MOD_COLOR = "#3B82F6";
 const TOP_EXTRA = Platform.OS === "web" ? 67 : 0;
 const EMPRESA_ID = 2;
@@ -827,12 +829,37 @@ export default function MotoristaApp() {
 
   const [motorista, setMotorista] = useState<any>(null);
   const [token, setToken] = useState<string>("");
+  const [sessionLoaded, setSessionLoaded] = useState(false);
   const [stats, setStats] = useState<any>(null);
   const [tab, setTab] = useState<AppTab>("inicio");
   const [refreshing, setRefreshing] = useState(false);
 
-  const handleAuth = (data: any, t: string) => { setMotorista(data); setToken(t); };
-  const handleLogout = () => { setMotorista(null); setToken(""); setStats(null); };
+  useEffect(() => {
+    AsyncStorage.getItem(MOTORISTA_SESSION_KEY)
+      .then(raw => {
+        if (!raw) return;
+        try {
+          const saved = JSON.parse(raw);
+          if (saved?.motorista && saved?.token) {
+            setMotorista(saved.motorista);
+            setToken(saved.token);
+          }
+        } catch {}
+      })
+      .finally(() => setSessionLoaded(true));
+  }, []);
+
+  const handleAuth = (data: any, t: string) => {
+    setMotorista(data);
+    setToken(t);
+    void AsyncStorage.setItem(MOTORISTA_SESSION_KEY, JSON.stringify({ motorista: data, token: t }));
+  };
+  const handleLogout = () => {
+    setMotorista(null);
+    setToken("");
+    setStats(null);
+    void AsyncStorage.removeItem(MOTORISTA_SESSION_KEY);
+  };
 
   const loadStats = useCallback(async () => {
     if (!token) return;
@@ -847,7 +874,14 @@ export default function MotoristaApp() {
     if (!token) return;
     try {
       const res = await fetch(`${API_BASE}/motorista-app/perfil`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) setMotorista(await res.json());
+      if (res.ok) {
+        const updatedMotorista = await res.json();
+        setMotorista(updatedMotorista);
+        void AsyncStorage.setItem(
+          MOTORISTA_SESSION_KEY,
+          JSON.stringify({ motorista: updatedMotorista, token }),
+        );
+      }
     } catch (_) {}
   }, [token]);
 
@@ -858,6 +892,14 @@ export default function MotoristaApp() {
   }, [loadStats, refreshPerfil]);
 
   useEffect(() => { if (token) { loadStats(); refreshPerfil(); } }, [token]);
+
+  if (!sessionLoaded) {
+    return (
+      <View style={[styles.flex1, { backgroundColor: colors.background, alignItems: "center", justifyContent: "center" }]}>
+        <ActivityIndicator color={MOD_COLOR} />
+      </View>
+    );
+  }
 
   // Not logged in
   if (!motorista) return <AuthScreen onAuth={handleAuth} isDark={isDark} colors={colors} insets={insets} />;

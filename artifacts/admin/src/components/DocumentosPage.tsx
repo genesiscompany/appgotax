@@ -34,6 +34,19 @@ const PERSON_STATUS: Record<string, { label: string; color: string; bg: string }
   bloqueado:  { label: "Bloqueado",   color: "#EF4444", bg: "#FEE2E2" },
 };
 
+const API_ORIGIN = (() => {
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (configured) {
+    try {
+      return new URL(configured, window.location.origin).origin;
+    } catch {}
+  }
+  if (typeof window !== "undefined" && window.location.hostname.startsWith("admin.")) {
+    return `${window.location.protocol}//${window.location.hostname.replace(/^admin\./, "api.")}`;
+  }
+  return typeof window !== "undefined" ? window.location.origin : "";
+})();
+
 const IconDoc = () => (
   <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -100,7 +113,9 @@ export default function DocumentosPage({
     return p[`doc_${tipo}_status`] || "pendente";
   }
   function getDocUrl(p: any, tipo: string): string | null {
-    return p[`doc_${tipo}`] || null;
+    const value = p[`doc_${tipo}`] || null;
+    if (!value || value === "enviado" || /^https?:\/\//i.test(value)) return value;
+    return value.startsWith("/") ? `${API_ORIGIN}${value}` : value;
   }
   function getApplicableDocs(p: any): DocField[] {
     return docFields.filter(df => !df.somentePara || df.somentePara(p));
