@@ -706,7 +706,11 @@ router.post("/documentos", async (req: Request, res: Response) => {
   const tipos: Record<string, string> = { cnh: "doc_cnh", veiculo: "doc_veiculo", selfie: "doc_selfie" };
   const statusCols: Record<string, string> = { cnh: "doc_cnh_status", veiculo: "doc_veiculo_status", selfie: "doc_selfie_status" };
   if (!tipos[tipo]) return res.status(400).json({ error: "tipo deve ser: cnh, veiculo ou selfie" });
-  if (typeof url !== "string" || !url.startsWith("/api/images/docs/")) {
+  const isStoredDocumentUrl = typeof url === "string" && (
+    url.startsWith("/api/images/docs/") ||
+    url.startsWith("/api/uploads/docs/")
+  );
+  if (!isStoredDocumentUrl) {
     return res.status(400).json({ error: "url_documento_invalida", message: "Envie o arquivo antes de registrar o documento" });
   }
   try {
@@ -1060,10 +1064,19 @@ router.post("/repasse/comprovante", upload.single("file"), async (req: Request, 
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
-const genericUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+const genericUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+    callback(null, allowed.includes(file.mimetype));
+  },
+});
 
 // ── POST /upload ────────────────────────────────────────────────────────────
 router.post("/upload", genericUpload.single("file"), async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
   if (!req.file) return res.status(400).json({ error: "no_file" });
   try {
     const url = await uploadImageToGCS(req.file.buffer, req.file.originalname, "docs");

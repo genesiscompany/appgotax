@@ -257,7 +257,14 @@ function StatusScreen({ motorista, token, onRefresh, isDark, colors, insets, onL
       Alert.alert("Documento enviado!", "Nossa equipe irá analisar em breve.");
     } catch (error) {
       console.error("[document-upload]", error);
-      Alert.alert("Erro", "Não foi possível enviar o documento. Tente novamente.");
+      const detail = error instanceof Error ? error.message : "";
+      const message =
+        detail === "Não autenticado"
+          ? "Sua sessão expirou. Saia e entre novamente antes de enviar."
+          : detail === "no_file"
+            ? "O arquivo selecionado não pôde ser lido. Escolha outra foto."
+            : "Não foi possível enviar o documento. Tente novamente.";
+      Alert.alert("Erro", message);
     } finally {
       setLoading(null);
     }

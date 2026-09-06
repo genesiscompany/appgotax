@@ -1,8 +1,26 @@
 import { objectStorageClient } from "./objectStorage";
 import { randomUUID } from "crypto";
 import path from "path";
+import fs from "fs/promises";
 
 const BUCKET_ID = process.env.DEFAULT_OBJECT_STORAGE_BUCKET_ID || "";
+const LOCAL_UPLOADS_DIR = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.resolve(process.cwd(), "public", "uploads");
+
+async function uploadImageLocally(
+  buffer: Buffer,
+  originalName: string,
+  folder: string,
+): Promise<string> {
+  const safeFolder = folder.replace(/[^a-zA-Z0-9_-]/g, "") || "uploads";
+  const ext = path.extname(originalName).toLowerCase() || ".jpg";
+  const filename = `${Date.now()}_${randomUUID()}${ext}`;
+  const destination = path.join(LOCAL_UPLOADS_DIR, safeFolder);
+  await fs.mkdir(destination, { recursive: true });
+  await fs.writeFile(path.join(destination, filename), buffer);
+  return `/api/uploads/${safeFolder}/${filename}`;
+}
 
 export async function uploadImageToGCS(
   buffer: Buffer,
@@ -10,20 +28,25 @@ export async function uploadImageToGCS(
   folder: string = "uploads"
 ): Promise<string> {
   if (!BUCKET_ID) {
-    throw new Error("DEFAULT_OBJECT_STORAGE_BUCKET_ID not set");
+    return uploadImageLocally(buffer, originalName, folder);
   }
 
   const ext = path.extname(originalName) || ".jpg";
   const filename = `${folder}/${Date.now()}_${randomUUID()}${ext}`;
 
-  const bucket = objectStorageClient.bucket(BUCKET_ID);
-  const file = bucket.file(filename);
+  try {
+    const bucket = objectStorageClient.bucket(BUCKET_ID);
+    const file = bucket.file(filename);
 
-  await file.save(buffer, {
-    metadata: { contentType: getMimeType(ext) },
-  });
+    await file.save(buffer, {
+      metadata: { contentType: getMimeType(ext) },
+    });
 
-  return `/api/images/${filename}`;
+    return `/api/images/${filename}`;
+  } catch (error) {
+    console.warn("[object-storage] Upload indisponível; usando armazenamento local.", error);
+    return uploadImageLocally(buffer, originalName, folder);
+  }
 }
 
 export async function serveImageFromStorage(
