@@ -21,7 +21,15 @@ function resolveAvatarUrl(raw: string | null | undefined): string | null {
   return `${UPLOADS_BASE}${path}`;
 }
 
-export type FormaPagamento = "maquininha" | "pix" | "dinheiro" | null;
+export type FormaPagamento =
+  | "maquininha"
+  | "pix"
+  | "pix_direto"
+  | "pix_app"
+  | "dinheiro"
+  | "cartao"
+  | "wallet"
+  | null;
 
 export type Customer = {
   id: number;

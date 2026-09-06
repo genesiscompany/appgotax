@@ -24,6 +24,15 @@ const EMPRESA_ID = 2;
 
 type PaymentChoice = "dinheiro" | "pix_direto" | "maquininha" | "pix_app" | "card_app" | "wallet";
 
+const PAYMENT_LABELS: Record<PaymentChoice, string> = {
+  dinheiro: "Dinheiro",
+  pix_direto: "Pix direto",
+  maquininha: "Maquininha",
+  pix_app: "Pix pelo app",
+  card_app: "Cartão salvo",
+  wallet: "Carteira",
+};
+
 function paymentPayload(choice: PaymentChoice) {
   if (choice === "pix_app") return { forma_pagamento: "pix", payment_source: "mercado_pago" as const, checkoutMethod: "pix" as const };
   if (choice === "card_app") return { forma_pagamento: "cartao", payment_source: "mercado_pago" as const, checkoutMethod: "cartao" as const };
@@ -177,7 +186,17 @@ export default function ClienteMotorista() {
 
   useEffect(() => {
     if (customer?.formaPagamento) {
-      setPagamento(customer.formaPagamento === "pix" ? "pix_direto" : customer.formaPagamento === "cartao" ? "card_app" : customer.formaPagamento);
+      setPagamento(
+        customer.formaPagamento === "pix" || customer.formaPagamento === "pix_direto"
+          ? "pix_direto"
+          : customer.formaPagamento === "pix_app"
+            ? "pix_app"
+            : customer.formaPagamento === "cartao"
+              ? "card_app"
+              : customer.formaPagamento === "wallet"
+                ? "wallet"
+                : customer.formaPagamento,
+      );
     }
   }, [customer?.formaPagamento]);
 
@@ -1211,28 +1230,37 @@ export default function ClienteMotorista() {
         )}
 
         {/* Pagamento */}
-        <Text style={[styles.tipoLabel, { color: colors.text, fontFamily: "Inter_600SemiBold", marginBottom: 10 }]}>Pagamento</Text>
-        <View style={styles.paymentChoices}>
-          {([
-            ...(paymentOptions.receber_direto ? [
-              { id: "dinheiro", label: "Dinheiro" },
-              { id: "pix_direto", label: "Pix direto" },
-              { id: "maquininha", label: "Maquininha" },
-            ] : []),
-            ...(paymentOptions.mercado_pago ? [{ id: "pix_app", label: "Pix pelo app" }] : []),
-            ...(paymentOptions.mercado_pago && savedCard ? [{ id: "card_app", label: `Cartão •••• ${savedCard.lastFour}` }] : []),
-            ...(paymentOptions.carteira ? [{ id: "wallet", label: "Carteira" }] : []),
-          ] as { id: PaymentChoice; label: string }[]).map(option => (
-            <Pressable
-              key={option.id}
-              onPress={() => setPagamento(option.id)}
-              style={[styles.paymentChoice, { borderColor: pagamento === option.id ? MOD_COLOR : colors.border, backgroundColor: pagamento === option.id ? MOD_COLOR + "18" : colors.backgroundSecondary }]}
-            >
-              <Feather name={option.id === "wallet" || option.id === "card_app" ? "credit-card" : option.id.includes("pix") ? "smartphone" : "dollar-sign"} size={15} color={pagamento === option.id ? MOD_COLOR : colors.textMuted} />
-              <Text style={[styles.paymentChoiceText, { color: pagamento === option.id ? MOD_COLOR : colors.text, fontFamily: "Inter_500Medium" }]}>{option.label}</Text>
-            </Pressable>
-          ))}
+        <View style={styles.paymentHeader}>
+          <Text style={[styles.tipoLabel, { color: colors.text, fontFamily: "Inter_600SemiBold", marginBottom: 0 }]}>Pagamento</Text>
+          <Pressable onPress={() => router.push("/cliente/perfil" as any)}>
+            <Text style={[styles.changePaymentText, { color: MOD_COLOR, fontFamily: "Inter_600SemiBold" }]}>Alterar</Text>
+          </Pressable>
         </View>
+        <Pressable
+          onPress={() => router.push("/cliente/perfil" as any)}
+          style={[styles.selectedPaymentCard, { borderColor: MOD_COLOR, backgroundColor: MOD_COLOR + "12" }]}
+        >
+          <View style={[styles.selectedPaymentIcon, { backgroundColor: MOD_COLOR + "20" }]}>
+            <Feather
+              name={pagamento === "wallet" || pagamento === "card_app" ? "credit-card" : pagamento.includes("pix") ? "smartphone" : "dollar-sign"}
+              size={18}
+              color={MOD_COLOR}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.selectedPaymentLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+              {pagamento === "card_app" && savedCard ? `Cartão •••• ${savedCard.lastFour}` : PAYMENT_LABELS[pagamento]}
+            </Text>
+            <Text style={[styles.selectedPaymentHint, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>
+              {pagamento === "dinheiro" || pagamento === "pix_direto" || pagamento === "maquininha"
+                ? "Pagamento direto ao motorista"
+                : pagamento === "wallet"
+                  ? "Pago com o saldo da Carteira GoTaxi"
+                  : "Pagamento processado pelo Mercado Pago"}
+            </Text>
+          </View>
+          <Feather name="chevron-right" size={18} color={MOD_COLOR} />
+        </Pressable>
 
         {/* Botão chamar */}
         <Pressable
@@ -1297,9 +1325,12 @@ const styles = StyleSheet.create({
   paymentSummaryInfo: { flexDirection: "row", alignItems: "center", gap: 9 },
   paymentSummaryText: { fontSize: 14 },
   paymentChangeText: { fontSize: 14 },
-  paymentChoices: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 14 },
-  paymentChoice: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderRadius: 12, paddingHorizontal: 11, paddingVertical: 9 },
-  paymentChoiceText: { fontSize: 13 },
+  paymentHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  changePaymentText: { fontSize: 13 },
+  selectedPaymentCard: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderRadius: 14, padding: 13, marginBottom: 14 },
+  selectedPaymentIcon: { width: 38, height: 38, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  selectedPaymentLabel: { fontSize: 14 },
+  selectedPaymentHint: { fontSize: 12, marginTop: 2 },
   chamarBtn: { height: 54, borderRadius: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },
   chamarBtnText: { fontSize: 16 },
   quickLinks: { flexDirection: "row", alignItems: "center", justifyContent: "center", marginTop: 12, gap: 12 },

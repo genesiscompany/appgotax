@@ -23,12 +23,21 @@ const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
 
 const BRAND_GREEN = "#22C55E";
 
-const FORMAS_PAGAMENTO: { id: FormaPagamento; label: string; icon: string; color: string; desc: string }[] = [
+type FormaPagamentoOption = { id: FormaPagamento; label: string; icon: string; color: string; desc: string };
+
+const PAGAMENTOS_DIRETOS: FormaPagamentoOption[] = [
   { id: "maquininha", label: "Maquininha", icon: "credit-card", color: "#3B82F6", desc: "Débito ou crédito" },
-  { id: "pix",        label: "Pix",         icon: "zap",         color: "#22C55E", desc: "Transferência instantânea" },
+  { id: "pix_direto", label: "Pix direto",  icon: "zap",         color: "#22C55E", desc: "Pago diretamente ao motorista" },
   { id: "dinheiro",  label: "Dinheiro",    icon: "dollar-sign", color: "#F59E0B", desc: "Pagamento em espécie" },
-  { id: "cartao",    label: "Cartão salvo", icon: "credit-card", color: "#009EE3", desc: "Cobrança segura pelo app" },
 ];
+
+const PAGAMENTOS_PELO_APP: FormaPagamentoOption[] = [
+  { id: "pix_app",   label: "Pix pelo app", icon: "smartphone",  color: "#22C55E", desc: "Cobrança processada pelo Mercado Pago" },
+  { id: "cartao",    label: "Cartão salvo", icon: "credit-card", color: "#009EE3", desc: "Cobrança segura pelo app" },
+  { id: "wallet",    label: "Carteira",     icon: "briefcase",   color: "#8B5CF6", desc: "Use o saldo da Carteira GoTaxi" },
+];
+
+const FORMAS_PAGAMENTO = [...PAGAMENTOS_DIRETOS, ...PAGAMENTOS_PELO_APP];
 
 function formatWhatsapp(num?: string | null) {
   const d = (num ?? "").replace(/\D/g, "");
@@ -46,6 +55,7 @@ function formatInput(val: string) {
 
 function labelFormaPagamento(fp: FormaPagamento) {
   if (!fp) return "Não definida";
+  if (fp === "pix") return "Pix direto";
   return FORMAS_PAGAMENTO.find(f => f.id === fp)?.label ?? fp;
 }
 
@@ -301,7 +311,8 @@ export default function PerfilScreen() {
   }
 
   const initials = (customer?.nome || "C").split(" ").filter(Boolean).map((n: string) => n[0]).slice(0, 2).join("").toUpperCase() || "C";
-  const fpAtual = FORMAS_PAGAMENTO.find(f => f.id === customer?.formaPagamento);
+  const formaPagamentoNormalizada = customer?.formaPagamento === "pix" ? "pix_direto" : customer?.formaPagamento;
+  const fpAtual = FORMAS_PAGAMENTO.find(f => f.id === formaPagamentoNormalizada);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -601,7 +612,11 @@ export default function PerfilScreen() {
             Escolha como prefere pagar nos seus pedidos.
           </Text>
 
-          <View style={[styles.pagamentoOptions, { opacity: pagamentoLoading ? 0.6 : 1 }]}>
+          <ScrollView
+            style={{ maxHeight: 520, opacity: pagamentoLoading ? 0.6 : 1 }}
+            contentContainerStyle={styles.pagamentoOptions}
+            showsVerticalScrollIndicator={false}
+          >
             {savedCard && (
               <View style={[styles.savedCardBox, { backgroundColor: "#009EE312", borderColor: "#009EE340" }]}>
                 <View style={[styles.pagamentoIcon, { backgroundColor: "#009EE320" }]}>
@@ -620,37 +635,46 @@ export default function PerfilScreen() {
                 </Pressable>
               </View>
             )}
-            {FORMAS_PAGAMENTO.map(fp => {
-              const selected = customer?.formaPagamento === fp.id;
-              return (
-                <Pressable
-                  key={fp.id}
-                  style={[
-                    styles.pagamentoCard,
-                    { backgroundColor: colors.background, borderColor: selected ? fp.color : colors.border },
-                    selected && { borderWidth: 2 },
-                  ]}
-                  onPress={() => !pagamentoLoading && handleSelecionarPagamento(fp.id)}
-                >
-                  <View style={[styles.pagamentoIcon, { backgroundColor: fp.color + "20" }]}>
-                    <Feather name={fp.icon as any} size={22} color={fp.color} />
-                  </View>
-                  <View style={styles.pagamentoInfo}>
-                    <Text style={[styles.pagamentoLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>{fp.label}</Text>
-                    <Text style={[styles.pagamentoDesc, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>
-                      {fp.id === "cartao" && savedCard ? `Final ${savedCard.lastFour}` : fp.desc}
-                    </Text>
-                  </View>
-                  {selected && (
-                    <View style={[styles.checkCircle, { backgroundColor: fp.color }]}>
-                      <Feather name="check" size={14} color="#fff" />
-                    </View>
-                  )}
-                  {!selected && pagamentoLoading && <ActivityIndicator size="small" color={fp.color} />}
-                </Pressable>
-              );
-            })}
-          </View>
+            {([
+              { title: "Pagamento direto", subtitle: "Pago diretamente ao motorista", options: PAGAMENTOS_DIRETOS },
+              { title: "Pagamento pelo app", subtitle: "Mercado Pago ou saldo da Carteira GoTaxi", options: PAGAMENTOS_PELO_APP },
+            ]).map(group => (
+              <View key={group.title} style={styles.pagamentoGroup}>
+                <Text style={[styles.pagamentoGroupTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>{group.title}</Text>
+                <Text style={[styles.pagamentoGroupSubtitle, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>{group.subtitle}</Text>
+                {group.options.map(fp => {
+                  const selected = formaPagamentoNormalizada === fp.id;
+                  return (
+                    <Pressable
+                      key={fp.id}
+                      style={[
+                        styles.pagamentoCard,
+                        { backgroundColor: colors.background, borderColor: selected ? fp.color : colors.border },
+                        selected && { borderWidth: 2 },
+                      ]}
+                      onPress={() => !pagamentoLoading && handleSelecionarPagamento(fp.id)}
+                    >
+                      <View style={[styles.pagamentoIcon, { backgroundColor: fp.color + "20" }]}>
+                        <Feather name={fp.icon as any} size={22} color={fp.color} />
+                      </View>
+                      <View style={styles.pagamentoInfo}>
+                        <Text style={[styles.pagamentoLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>{fp.label}</Text>
+                        <Text style={[styles.pagamentoDesc, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>
+                          {fp.id === "cartao" && savedCard ? `Final ${savedCard.lastFour}` : fp.desc}
+                        </Text>
+                      </View>
+                      {selected && (
+                        <View style={[styles.checkCircle, { backgroundColor: fp.color }]}>
+                          <Feather name="check" size={14} color="#fff" />
+                        </View>
+                      )}
+                      {!selected && pagamentoLoading && <ActivityIndicator size="small" color={fp.color} />}
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ))}
+          </ScrollView>
 
           {savedCard && (
             <Pressable
@@ -834,6 +858,9 @@ const styles = StyleSheet.create({
   erroBox: { flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10, borderWidth: 1, padding: 12 },
   erroText: { color: "#EF4444", fontSize: 13, flex: 1 },
   pagamentoOptions: { gap: 10, marginBottom: 20 },
+  pagamentoGroup: { gap: 10, marginBottom: 14 },
+  pagamentoGroupTitle: { fontSize: 15, marginTop: 2 },
+  pagamentoGroupSubtitle: { fontSize: 12, marginTop: -6, marginBottom: 2 },
   savedCardBox: { flexDirection: "row", alignItems: "center", gap: 14, borderRadius: 14, borderWidth: 1, padding: 16 },
   pagamentoCard: { flexDirection: "row", alignItems: "center", gap: 14, borderRadius: 14, borderWidth: 1, padding: 16 },
   pagamentoIcon: { width: 46, height: 46, borderRadius: 13, alignItems: "center", justifyContent: "center" },
