@@ -2,7 +2,7 @@
   "expo": {
     "name": "GoTaxi Brasil Plus",
     "slug": "saas-mobile",
-    "version": "2.3.1",
+    "version": "2.0.4",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "saas-mobile",
@@ -25,7 +25,7 @@
     },
     "android": {
       "package": "br.gotaxi.app",
-      "versionCode": 231,
+      "versionCode": 204,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#2563EB"
@@ -59,11 +59,12 @@
       [
         "expo-router",
         {
-          "origin": "https://replit.com/"
+          "origin": "https://api.gotaxi.com.br/"
         }
       ],
       "expo-font",
       "expo-web-browser",
+      "expo-notifications",
       [
         "expo-image-picker",
         {

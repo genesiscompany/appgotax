@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
+import { ensurePushTables } from "../lib/ensurePushTables";
 
 const router: IRouter = Router();
 
@@ -24,6 +25,7 @@ function requireCliente(req: any, res: any): number | null {
 // ── POST /api/cliente/push-token ───────────────────────────────────────────
 router.post("/push-token", async (req, res) => {
   try {
+    await ensurePushTables();
     const { token: authToken, pushToken, modulo } = req.body;
     if (!pushToken) return res.status(400).json({ error: "bad_request", message: "pushToken obrigatório" });
 
@@ -311,9 +313,9 @@ router.put("/passagens/:id/cancelar", async (req, res) => {
 // PROGRAMA DE AFILIADOS
 // ─────────────────────────────────────────────────────────────────────────────
 
-function gerarCodigoAfiliado(nome: string, userId: number): string {
-  const prefix = (nome || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) || "GO";
-  const suffix = String(userId).padStart(4, "0");
+function gerarCodigoAfiliado(nome: string, afiliadoId: number): string {
+  const prefix = (nome || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "GO";
+  const suffix = String(afiliadoId).padStart(4, "0");
   return `${prefix}${suffix}`;
 }
 
@@ -332,28 +334,25 @@ router.get("/afiliados/perfil", async (req, res) => {
 
     if (!rows.length) {
       const user = (await db.execute(sql`SELECT nome FROM usuarios WHERE id = ${usuarioId}`)).rows[0] as any;
-      for (let attempt = 0; attempt < 3 && !rows.length; attempt++) {
-        const base = gerarCodigoAfiliado(user?.nome ?? "", usuarioId);
-        const codigo = attempt === 0 ? base : `${base}${Math.floor(Math.random() * 900) + 100}`;
-        try {
-          const inserted = (await db.execute(sql`
-            INSERT INTO afiliados (usuario_id, codigo) VALUES (${usuarioId}, ${codigo})
-            ON CONFLICT (usuario_id) DO NOTHING
-            RETURNING *, (SELECT nome FROM usuarios WHERE id = ${usuarioId}) AS nome
-          `)).rows;
-          if (inserted.length) {
-            rows = inserted as any[];
-          } else {
-            rows = (await db.execute(sql`
-              SELECT a.*, u.nome FROM afiliados a
-              JOIN usuarios u ON u.id = a.usuario_id
-              WHERE a.usuario_id = ${usuarioId}
-            `)).rows;
-          }
-        } catch (e: any) {
-          if (e.code === "23505" && attempt < 2) continue;
-          throw e;
-        }
+      const inserted = (await db.execute(sql`
+        INSERT INTO afiliados (usuario_id, codigo)
+        VALUES (${usuarioId}, 'TEMP_${usuarioId}')
+        ON CONFLICT (usuario_id) DO UPDATE SET usuario_id = afiliados.usuario_id
+        RETURNING id
+      `)).rows[0] as any;
+      const afiliadoId = inserted.id;
+      const codigo = gerarCodigoAfiliado(user?.nome ?? "", afiliadoId);
+      rows = (await db.execute(sql`
+        UPDATE afiliados SET codigo = ${codigo} WHERE id = ${afiliadoId}
+        RETURNING *, (SELECT nome FROM usuarios WHERE id = ${usuarioId}) AS nome
+      `)).rows;
+    } else {
+      const perfil = rows[0] as any;
+      const expectedCode = gerarCodigoAfiliado(perfil.nome ?? "", perfil.id);
+      if (perfil.codigo !== expectedCode) {
+        await db.execute(sql`UPDATE afiliados SET codigo = ${expectedCode} WHERE id = ${perfil.id}`);
+        perfil.codigo = expectedCode;
+        rows = [perfil];
       }
     }
 

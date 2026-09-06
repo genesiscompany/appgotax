@@ -10,6 +10,7 @@ import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Colors from "@/constants/colors";
+import { getExpoPushToken } from "@/hooks/usePushNotifications";
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api` : "/api";
 const MOTORISTA_SESSION_KEY = "@gotaxi_motorista_app_session";
@@ -892,6 +893,25 @@ export default function MotoristaApp() {
   }, [loadStats, refreshPerfil]);
 
   useEffect(() => { if (token) { loadStats(); refreshPerfil(); } }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    void getExpoPushToken().then(async pushToken => {
+      if (!pushToken) return;
+      try {
+        const response = await fetch(`${API_BASE}/cliente/push-token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, pushToken, modulo: "motorista" }),
+        });
+        if (!response.ok) {
+          console.warn("[push-registration] API recusou o token:", response.status);
+        }
+      } catch (error) {
+        console.warn("[push-registration] Não foi possível registrar o token:", error);
+      }
+    });
+  }, [token]);
 
   if (!sessionLoaded) {
     return (

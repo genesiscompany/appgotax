@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { usuariosTable, empresasTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 import jwt from "jsonwebtoken";
+import { ensurePushTables } from "../lib/ensurePushTables";
 
 const router: IRouter = Router();
 const JWT_SECRET = process.env["JWT_SECRET"] || "gotaxi-admin-secret-2024";
@@ -324,6 +325,7 @@ router.delete("/usuarios/:id", requireAdmin, async (req, res) => {
     await db.execute(`DELETE FROM afiliado_resgates WHERE afiliado_id IN (SELECT id FROM afiliados WHERE usuario_id = ${id})`);
     await db.execute(`DELETE FROM afiliado_comissoes WHERE afiliado_id IN (SELECT id FROM afiliados WHERE usuario_id = ${id})`);
     await db.execute(`DELETE FROM afiliado_indicacoes WHERE afiliado_id IN (SELECT id FROM afiliados WHERE usuario_id = ${id})`);
+    await db.execute(`DELETE FROM afiliado_indicacoes WHERE usuario_indicado_id = ${id}`);
     await db.execute(`DELETE FROM afiliados WHERE usuario_id = ${id}`);
     const out = await db.execute(`DELETE FROM usuarios WHERE id = ${id} RETURNING id`);
     if (!(out as any).rows?.length) return res.status(404).json({ error: "Usuário não encontrado" });
@@ -880,6 +882,7 @@ router.patch("/repasses/pro/:id/bloquear", requireAdmin, async (req, res) => {
 // ── GET /api/admin/push/historico ───────────────────────────────────────────
 router.get("/push/historico", requireAdmin, async (_req, res) => {
   try {
+    await ensurePushTables();
     const rows = await db.execute(`SELECT * FROM push_historico ORDER BY criado_em DESC LIMIT 50`);
     return res.json(rows.rows);
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
@@ -888,6 +891,7 @@ router.get("/push/historico", requireAdmin, async (_req, res) => {
 // ── GET /api/admin/push/stats ───────────────────────────────────────────────
 router.get("/push/stats", requireAdmin, async (_req, res) => {
   try {
+    await ensurePushTables();
     const rows = await db.execute(`
       SELECT
         COUNT(*) FILTER (WHERE ativo = true) AS total,
@@ -906,6 +910,7 @@ router.get("/push/stats", requireAdmin, async (_req, res) => {
 // ── POST /api/admin/push/send ────────────────────────────────────────────────
 router.post("/push/send", requireAdmin, async (req, res) => {
   try {
+    await ensurePushTables();
     const { titulo, mensagem, modulo, dados } = req.body;
     if (!titulo || !mensagem) return res.status(400).json({ error: "bad_request", message: "Título e mensagem obrigatórios" });
 

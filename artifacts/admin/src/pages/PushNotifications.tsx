@@ -26,15 +26,21 @@ export default function PushNotifications() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [historico, setHistorico] = useState<Historico[]>([]);
   const [loadingStats, setLoadingStats] = useState(true);
+  const [statsError, setStatsError] = useState("");
 
   const authHeader = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 
   const loadStats = async () => {
     setLoadingStats(true);
+    setStatsError("");
     try {
       const r = await fetch(`${API}/push/stats`, { headers: authHeader });
-      if (r.ok) setStats(await r.json());
-    } catch {}
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setStats(await r.json());
+    } catch {
+      setStats(null);
+      setStatsError("Não foi possível consultar os dispositivos na API.");
+    }
     setLoadingStats(false);
   };
 
@@ -99,6 +105,9 @@ export default function PushNotifications() {
           </div>
         ))}
       </div>
+      {statsError && (
+        <p className="text-sm text-red-500 font-medium">{statsError}</p>
+      )}
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Formulário de envio */}
