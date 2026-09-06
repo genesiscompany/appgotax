@@ -8,6 +8,8 @@ import fs from "fs";
 import { uploadImageToGCS } from "../lib/uploadImage";
 import { finalizeServicePayment, settleServiceEarning } from "./payments";
 import { issueMotoristaToken, motoristaIdFromRequest } from "../lib/motoristaToken";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { encryptToken } from "./payments";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -137,6 +139,151 @@ async function ensureTable() {
     WHERE codigo_referral IS NULL
   `);
 }
+
+function oauthEnvironment() { return process.env.MERCADO_PAGO_OAUTH_ENVIRONMENT === "sandbox" ? "sandbox" : "production"; }
+function oauthCallbackUrl() {
+  const base = process.env.PUBLIC_API_BASE_URL || "https://api.gotaxi.com.br";
+  if (!/^https:\/\//.test(base)) throw new Error("PUBLIC_API_BASE_URL must be an HTTPS public API URL");
+  return `${base.replace(/\/$/, "")}/api/motorista-app/mercado-pago/callback`;
+}
+function oauthStateSecret() {
+  if (!process.env.SESSION_SECRET) throw new Error("SESSION_SECRET is required for Mercado Pago OAuth");
+  return process.env.SESSION_SECRET;
+}
+function signOauthState(motoristaId: number, nonce: string, environment: string, expiresAt: number) {
+  const payload = `${motoristaId}.${nonce}.${environment}.${expiresAt}`;
+  return `${payload}.${createHmac("sha256", oauthStateSecret()).update(payload).digest("base64url")}`;
+}
+function parseOauthState(value: string) {
+  const parts = value.split(".");
+  if (parts.length !== 5) return null;
+  const [id, nonce, environment, expiry, signature] = parts;
+  const payload = `${id}.${nonce}.${environment}.${expiry}`;
+  const expected = createHmac("sha256", oauthStateSecret()).update(payload).digest("base64url");
+  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  const motoristaId = Number(id), expiresAt = Number(expiry);
+  if (!Number.isInteger(motoristaId) || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || !nonce || !["sandbox", "production"].includes(environment)) return null;
+  return { motoristaId, nonce, environment, expiresAt };
+}
+async function snapshotServiceCommission(tx: any, module: "motorista" | "entrega", referenceId: number, motoristaId: number) {
+  const intent = await tx.execute(sql`SELECT id, payment_source, gross_amount_cents FROM payment_transactions
+    WHERE module = ${module} AND reference_id = ${String(referenceId)} FOR UPDATE`);
+  const payment = intent.rows[0] as any;
+  if (!payment || !["mercado_pago", "wallet"].includes(String(payment.payment_source))) return;
+  const driver = await tx.execute(sql`SELECT percentual_repasse FROM motoristas_app WHERE id = ${motoristaId} FOR UPDATE`);
+  const row = driver.rows[0] as any;
+  if (!row) throw new Error("service_driver_not_found");
+  const percentage = Math.min(100, Math.max(0, Number(row.percentual_repasse ?? 0)));
+  const feeCents = Math.min(Number(payment.gross_amount_cents), Math.round(Number(payment.gross_amount_cents) * percentage / 100));
+  let commissionMetadata: Record<string, unknown>;
+  if (payment.payment_source === "mercado_pago") {
+    const seller = await tx.execute(sql`SELECT mercado_pago_user_id FROM motorista_mercado_pago_connections
+      WHERE motorista_id = ${motoristaId} AND status = 'active' FOR UPDATE`);
+    const sellerRow = seller.rows[0] as any;
+    if (!sellerRow?.mercado_pago_user_id) throw new Error("marketplace_seller_connection_required");
+    commissionMetadata = { motoristaId, sellerMercadoPagoUserId: String(sellerRow.mercado_pago_user_id), marketplaceCommissionPercent: percentage, marketplaceFeeCents: feeCents };
+  } else {
+    commissionMetadata = { motoristaId, internalCommission: true, internalCommissionPercent: percentage, internalCommissionFeeCents: feeCents };
+  }
+  await tx.execute(sql`UPDATE payment_transactions SET platform_fee_cents = ${feeCents},
+    metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify(commissionMetadata)}::jsonb,
+    updated_at = NOW() WHERE id = ${payment.id}`);
+}
+async function hasPendingMarketplacePayments(tx: any, motoristaId: number, sellerUserId?: string) {
+  const pending = await tx.execute(sql`SELECT id FROM payment_transactions
+    WHERE payment_source = 'mercado_pago'
+      AND metadata->>'motoristaId' = ${String(motoristaId)}
+      AND (${sellerUserId || null}::text IS NULL OR metadata->>'sellerMercadoPagoUserId' = ${sellerUserId || null})
+      AND status NOT IN ('approved', 'rejected', 'cancelled', 'canceled', 'refunded')
+    LIMIT 1 FOR UPDATE`);
+  return !!pending.rows[0];
+}
+
+router.get("/mercado-pago/status", async (req, res) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) { res.status(401).json({ error: "unauthorized" }); return; }
+  const found = await db.execute(sql`SELECT mercado_pago_user_id, encrypted_refresh_token, expires_at, status, scopes, oauth_environment
+    FROM motorista_mercado_pago_connections WHERE motorista_id = ${motoristaId} LIMIT 1`);
+  const row = found.rows[0] as any;
+  const active = row?.status === "active" && (!!row.encrypted_refresh_token || (!row.expires_at || new Date(row.expires_at).getTime() > Date.now()));
+  res.json({ connected: active, status: active ? "active" : (row?.status || "disconnected"), expiresAt: row?.expires_at || null, scopes: row?.scopes || null });
+});
+
+router.post("/mercado-pago/connect", async (req, res) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) { res.status(401).json({ error: "unauthorized" }); return; }
+  const clientId = process.env.MERCADO_PAGO_CLIENT_ID;
+  if (!clientId || !process.env.MERCADO_PAGO_CLIENT_SECRET) { res.status(503).json({ error: "mercado_pago_oauth_not_configured" }); return; }
+  try {
+    const environment = oauthEnvironment(), nonce = randomBytes(32).toString("base64url"), expiresAt = Date.now() + 10 * 60_000;
+    await db.execute(sql`DELETE FROM motorista_mercado_pago_oauth_states WHERE expires_at < NOW()`);
+    await db.execute(sql`INSERT INTO motorista_mercado_pago_oauth_states (motorista_id, nonce, oauth_environment, expires_at)
+      VALUES (${motoristaId}, ${nonce}, ${environment}, ${new Date(expiresAt)})`);
+    const authorizeUrl = new URL("https://auth.mercadopago.com/authorization");
+    authorizeUrl.search = new URLSearchParams({ client_id: clientId, response_type: "code", platform_id: "mp", redirect_uri: oauthCallbackUrl(), state: signOauthState(motoristaId, nonce, environment, expiresAt) }).toString();
+    res.json({ authorizeUrl: authorizeUrl.toString() });
+  } catch (err) { (req as any).log?.error({ err }, "Mercado Pago OAuth start failed"); res.status(500).json({ error: "mercado_pago_oauth_start_failed" }); }
+});
+
+router.post("/mercado-pago/disconnect", async (req, res) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) { res.status(401).json({ error: "unauthorized" }); return; }
+  const disconnected = await db.transaction(async tx => {
+    const connection = await tx.execute(sql`SELECT mercado_pago_user_id FROM motorista_mercado_pago_connections
+      WHERE motorista_id = ${motoristaId} AND status = 'active' FOR UPDATE`);
+    const sellerUserId = String((connection.rows[0] as any)?.mercado_pago_user_id || "");
+    if (sellerUserId && await hasPendingMarketplacePayments(tx, motoristaId, sellerUserId)) return false;
+    await tx.execute(sql`UPDATE motorista_mercado_pago_connections SET status = 'disconnected', revoked_at = NOW(),
+      encrypted_access_token = NULL, encrypted_refresh_token = NULL, updated_at = NOW() WHERE motorista_id = ${motoristaId}`);
+    await tx.execute(sql`UPDATE motoristas_app SET aceita_pagamento_app = false, atualizado_em = NOW() WHERE id = ${motoristaId}`);
+    return true;
+  });
+  if (!disconnected) {
+    res.status(409).json({ error: "marketplace_payments_pending", message: "Há pagamentos Mercado Pago pendentes. Aguarde a conclusão ou reconciliação antes de desconectar." });
+    return;
+  }
+  res.json({ disconnected: true });
+});
+
+router.get("/mercado-pago/callback", async (req, res) => {
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  const parsed = state ? parseOauthState(state) : null;
+  if (!code || !parsed) { res.status(400).send("Conexão Mercado Pago inválida ou expirada."); return; }
+  try {
+    const body = new URLSearchParams({ grant_type: "authorization_code", client_id: process.env.MERCADO_PAGO_CLIENT_ID || "", client_secret: process.env.MERCADO_PAGO_CLIENT_SECRET || "", code, redirect_uri: oauthCallbackUrl() });
+    const response = await fetch("https://api.mercadopago.com/oauth/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    const token: any = await response.json().catch(() => ({}));
+    if (!response.ok || !token.access_token || !token.user_id) throw new Error(String(token.error || "oauth_exchange_failed"));
+    const expiresAt = new Date(Date.now() + Math.max(60, Number(token.expires_in || 0)) * 1000);
+    const connected = await db.transaction(async tx => {
+      const stateConsumed = await tx.execute(sql`UPDATE motorista_mercado_pago_oauth_states SET consumed_at = NOW()
+        WHERE motorista_id = ${parsed.motoristaId} AND nonce = ${parsed.nonce} AND oauth_environment = ${parsed.environment}
+          AND expires_at > NOW() AND consumed_at IS NULL RETURNING id`);
+      if (!stateConsumed.rows[0]) return "state_invalid";
+      const previous = await tx.execute(sql`SELECT mercado_pago_user_id FROM motorista_mercado_pago_connections
+        WHERE motorista_id = ${parsed.motoristaId} FOR UPDATE`);
+      const previousSeller = String((previous.rows[0] as any)?.mercado_pago_user_id || "");
+      if (previousSeller && previousSeller !== String(token.user_id) &&
+        await hasPendingMarketplacePayments(tx, parsed.motoristaId, previousSeller)) {
+        throw new Error("marketplace_payments_pending");
+      }
+      await tx.execute(sql`INSERT INTO motorista_mercado_pago_connections
+        (motorista_id, mercado_pago_user_id, encrypted_access_token, encrypted_refresh_token, expires_at, scopes, status, oauth_environment, revoked_at, invalidated_at, last_error_code, updated_at)
+        VALUES (${parsed.motoristaId}, ${String(token.user_id)}, ${encryptToken(token.access_token)}, ${token.refresh_token ? encryptToken(token.refresh_token) : null}, ${expiresAt}, ${String(token.scope || "")}, 'active', ${parsed.environment}, NULL, NULL, NULL, NOW())
+        ON CONFLICT (motorista_id) DO UPDATE SET mercado_pago_user_id = EXCLUDED.mercado_pago_user_id, encrypted_access_token = EXCLUDED.encrypted_access_token, encrypted_refresh_token = EXCLUDED.encrypted_refresh_token, expires_at = EXCLUDED.expires_at, scopes = EXCLUDED.scopes, status = 'active', oauth_environment = EXCLUDED.oauth_environment, revoked_at = NULL, invalidated_at = NULL, last_error_code = NULL, updated_at = NOW()`);
+      return "connected";
+    });
+    if (connected === "state_invalid") { res.status(400).send("Conexão Mercado Pago já utilizada ou expirada."); return; }
+    res.type("html").send("<!doctype html><title>GoTaxi</title><p>Mercado Pago conectado. Você já pode voltar ao GoTaxi Pro.</p>");
+  } catch (err) {
+    if (err instanceof Error && err.message === "marketplace_payments_pending") {
+      res.status(409).type("html").send("<!doctype html><title>GoTaxi</title><p>Não é possível trocar a conta Mercado Pago enquanto há pagamentos pendentes. Aguarde a conclusão ou reconciliação e tente novamente.</p>");
+      return;
+    }
+    (req as any).log?.error({ err }, "Mercado Pago OAuth callback failed"); res.status(502).send("Não foi possível conectar o Mercado Pago. Tente novamente.");
+  }
+});
 
 function gerarCodigoReferral(nome: string, id: number): string {
   const prefix = (nome || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "GT";
@@ -484,6 +631,13 @@ router.put("/perfil", async (req: Request, res: Response) => {
     return res.status(400).json({ error: "aceita_pagamento_app deve ser booleano" });
   }
   try {
+    if (aceita_pagamento_app === true) {
+      const connection = await db.execute(sql`SELECT id FROM motorista_mercado_pago_connections
+        WHERE motorista_id = ${motoristaId} AND status = 'active' AND (expires_at > NOW() OR encrypted_refresh_token IS NOT NULL) LIMIT 1`);
+      if (!connection.rows[0]) {
+        return res.status(409).json({ error: "mercado_pago_connection_required", message: "Conecte uma conta Mercado Pago ativa antes de aceitar pagamentos pelo app." });
+      }
+    }
     await db.execute(sql`
       UPDATE motoristas_app SET
         nome = COALESCE(${nome || null}, nome),
@@ -999,7 +1153,7 @@ router.get("/corrida-pendente", async (req: Request, res: Response) => {
       WHERE cs.motorista_id = ${motoristaId} AND cs.status = 'aguardando'
         AND (
           (COALESCE(cs.payment_source, 'direto') = 'direto' AND ma.aceita_pagamento_direto = true)
-          OR (cs.payment_source = 'mercado_pago' AND ma.aceita_pagamento_app = true)
+          OR (cs.payment_source = 'mercado_pago' AND ma.aceita_pagamento_app = true AND EXISTS (SELECT 1 FROM motorista_mercado_pago_connections mp WHERE mp.motorista_id = ma.id AND mp.status = 'active' AND (mp.expires_at > NOW() OR mp.encrypted_refresh_token IS NOT NULL)))
         )
       ORDER BY criado_em DESC LIMIT 1
     `));
@@ -1015,37 +1169,39 @@ router.post("/corrida/:id/aceitar", async (req: Request, res: Response) => {
   try {
     await ensureCorridasTable();
 
-    // Update corridas_solicitadas
-    const updRows = await db.execute(sql.raw(`
+    const corridaId = await db.transaction(async tx => {
+    const updRows = await tx.execute(sql.raw(`
       UPDATE corridas_solicitadas SET status = 'aceita'
       WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} AND status = 'aguardando'
       RETURNING corrida_id
     `));
 
-    if (!updRows.rows.length) {
-      return res.status(409).json({ error: "corrida_indisponivel" });
-    }
+    if (!updRows.rows.length) return null;
 
     const corrida_id = (updRows.rows[0] as any).corrida_id;
 
     // Get driver info to update main corridas table
-    const driverRows = await db.execute(sql.raw(`
+    const driverRows = await tx.execute(sql.raw(`
       SELECT nome FROM motoristas_app WHERE id = ${motoristaId}
     `));
     const motoristaNome = driverRows.rows.length > 0 ? (driverRows.rows[0] as any).nome : "Motorista";
 
     // Sync status to main corridas table so passenger app sees the update
     if (corrida_id) {
-      await db.execute(sql.raw(`
+      await tx.execute(sql.raw(`
         UPDATE corridas SET
           status = 'aceita',
           motorista_app_id = ${motoristaId},
           motorista_app_nome = '${motoristaNome.replace(/'/g, "''")}'
         WHERE id = ${corrida_id} AND status = 'aguardando'
       `));
+      await snapshotServiceCommission(tx, "motorista", Number(corrida_id), motoristaId);
     }
+    return Number(corrida_id);
+    });
+    if (!corridaId) return res.status(409).json({ error: "corrida_indisponivel" });
 
-    return res.json({ ok: true, corrida_id });
+    return res.json({ ok: true, corrida_id: corridaId });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -1536,7 +1692,7 @@ router.get("/entrega-pendente", async (req: Request, res: Response) => {
       WHERE es.profissional_id = ${motoristaId} AND es.status = 'aguardando'
         AND (
           (COALESCE(es.payment_source, 'direto') = 'direto' AND ma.aceita_pagamento_direto = true)
-          OR (es.payment_source IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true)
+          OR (es.payment_source IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true AND EXISTS (SELECT 1 FROM motorista_mercado_pago_connections mp WHERE mp.motorista_id = ma.id AND mp.status = 'active' AND (mp.expires_at > NOW() OR mp.encrypted_refresh_token IS NOT NULL)))
         )
       ORDER BY criado_em DESC LIMIT 1
     `));
@@ -1551,11 +1707,13 @@ router.post("/entrega/:id/aceitar", async (req: Request, res: Response) => {
   if (!motoristaId) return res.status(401).json({ error: "unauthorized" });
   try {
     await ensureEntregasTable();
-    const sel = await db.execute(sql.raw(`
+    const accepted = await db.transaction(async tx => {
+    const sel = await tx.execute(sql.raw(`
       SELECT entrega_id, pedido_pdv_id, empresa_id FROM entregas_solicitadas
       WHERE id = ${Number(req.params.id)} AND profissional_id = ${motoristaId} AND status = 'aguardando'
+      FOR UPDATE
     `));
-    if (!sel.rows.length) return res.status(404).json({ error: "not_found" });
+    if (!sel.rows.length) return { error: "not_found" as const };
     const row = sel.rows[0] as any;
     const entregaId = row.entrega_id;
     const pedidoPdvId = row.pedido_pdv_id;
@@ -1564,7 +1722,7 @@ router.post("/entrega/:id/aceitar", async (req: Request, res: Response) => {
     // ── Caso 1: entrega vem de pedido do PDV (auto-despacho de delivery) ──
     if (pedidoPdvId) {
       // Race-safe: só assume o pedido se ainda não tem boy. Tenant-isolado por empresa_id.
-      const claim = await db.execute(sql.raw(`
+      const claim = await tx.execute(sql.raw(`
         UPDATE pedidos_pdv SET boy_id = ${motoristaId}
         WHERE id = ${Number(pedidoPdvId)} AND boy_id IS NULL
           ${empresaId ? `AND empresa_id = ${Number(empresaId)}` : ""}
@@ -1572,49 +1730,56 @@ router.post("/entrega/:id/aceitar", async (req: Request, res: Response) => {
         RETURNING id
       `));
       if (!claim.rows.length) {
-        await db.execute(sql.raw(`
+        await tx.execute(sql.raw(`
           UPDATE entregas_solicitadas SET status = 'expirada'
           WHERE id = ${Number(req.params.id)}
         `));
-        return res.status(409).json({ error: "already_taken" });
+        return { error: "already_taken" as const };
       }
       // Cancela demais broadcasts deste pedido (perderam a corrida)
-      await db.execute(sql.raw(`
+      await tx.execute(sql.raw(`
         UPDATE entregas_solicitadas SET status = 'cancelada'
         WHERE pedido_pdv_id = ${Number(pedidoPdvId)}
           AND id <> ${Number(req.params.id)}
           AND status = 'aguardando'
       `));
-      await db.execute(sql.raw(`
+      await tx.execute(sql.raw(`
         UPDATE entregas_solicitadas SET status = 'aceita'
         WHERE id = ${Number(req.params.id)} AND profissional_id = ${motoristaId}
       `));
-      return res.json({ ok: true, pedido_pdv_id: Number(pedidoPdvId) });
+      return { pedidoPdvId: Number(pedidoPdvId) };
     }
 
     // ── Caso 2: entrega comum (módulo encomendas/entregas) ──
     if (entregaId) {
-      const claim = await db.execute(sql.raw(`
+      const claim = await tx.execute(sql.raw(`
         UPDATE entregas SET motorista_id = ${motoristaId}, status = 'coletado'
         WHERE id = ${Number(entregaId)} AND motorista_id IS NULL
         RETURNING id
       `));
       if (!claim.rows.length) {
-        await db.execute(sql.raw(`
+        await tx.execute(sql.raw(`
           UPDATE entregas_solicitadas SET status = 'expirada'
           WHERE id = ${Number(req.params.id)}
         `));
-        return res.status(409).json({ error: "already_taken" });
+        return { error: "already_taken" as const };
       }
-      await db.execute(sql.raw(`
+      await tx.execute(sql.raw(`
         UPDATE entregas_solicitadas SET status = 'cancelada'
         WHERE entrega_id = ${Number(entregaId)} AND id <> ${Number(req.params.id)} AND status = 'aguardando'
       `));
     }
-    await db.execute(sql.raw(`
+    await tx.execute(sql.raw(`
       UPDATE entregas_solicitadas SET status = 'aceita'
       WHERE id = ${Number(req.params.id)} AND profissional_id = ${motoristaId}
     `));
+    if (entregaId) {
+      await snapshotServiceCommission(tx, "entrega", Number(entregaId), motoristaId);
+    }
+    return { entregaId: Number(entregaId) };
+    });
+    if ("error" in accepted) return res.status(accepted.error === "not_found" ? 404 : 409).json({ error: accepted.error });
+    if ("pedidoPdvId" in accepted) return res.json({ ok: true, pedido_pdv_id: accepted.pedidoPdvId });
     return res.json({ ok: true });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
@@ -2063,7 +2228,7 @@ export async function dispatchEntregaToEntregadores(entrega: any): Promise<{ dis
       WHERE tipo_profissional IN ('entregador','delivery') AND ativo = true
         AND (
           (COALESCE('${esc(String(entrega.payment_source || "direto"))}', 'direto') = 'direto' AND aceita_pagamento_direto = true)
-          OR ('${esc(String(entrega.payment_source || "direto"))}' IN ('mercado_pago', 'wallet') AND aceita_pagamento_app = true)
+          OR ('${esc(String(entrega.payment_source || "direto"))}' IN ('mercado_pago', 'wallet') AND aceita_pagamento_app = true AND EXISTS (SELECT 1 FROM motorista_mercado_pago_connections mp WHERE mp.motorista_id = motoristas_app.id AND mp.status = 'active' AND (mp.expires_at > NOW() OR mp.encrypted_refresh_token IS NOT NULL)))
         )
     `));
     const motoristas = moto.rows as any[];

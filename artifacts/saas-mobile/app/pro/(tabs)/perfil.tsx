@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, Alert, ActivityIndicator, StatusBar, Modal, Image, Platform, Share, KeyboardAvoidingView, Switch,
+  TextInput, Alert, ActivityIndicator, StatusBar, Modal, Image, Platform, Share, KeyboardAvoidingView, Switch, Linking,
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -431,6 +431,8 @@ export default function ProPerfil() {
   const [enviandoPixImg, setEnviandoPixImg] = useState(false);
   const [pixTipo, setPixTipo] = useState(proUser?.pix_tipo || "cpf");
   const [pixChave, setPixChave] = useState(proUser?.pix_chave || "");
+  const [mpConnection, setMpConnection] = useState<{ connected: boolean; status: string }>({ connected: false, status: "disconnected" });
+  const [mpLoading, setMpLoading] = useState(false);
 
   useEffect(() => {
     setForm({
@@ -442,6 +444,15 @@ export default function ProPerfil() {
     setPixTipo(proUser?.pix_tipo || "cpf");
     setPixChave(proUser?.pix_chave || "");
   }, [proUser]);
+
+  const refreshMercadoPago = useCallback(async () => {
+    if (!proUser?.token) return;
+    try {
+      const res = await fetch(`${API_BASE}/motorista-app/mercado-pago/status`, { headers: { Authorization: `Bearer ${proUser.token}` } });
+      if (res.ok) setMpConnection(await res.json());
+    } catch {}
+  }, [proUser?.token]);
+  useEffect(() => { refreshMercadoPago(); }, [refreshMercadoPago]);
 
   if (!proUser) return null;
 
@@ -484,6 +495,10 @@ export default function ProPerfil() {
   };
 
   const salvarRecebimento = async (campo: "aceita_pagamento_direto" | "aceita_pagamento_app", valor: boolean) => {
+    if (campo === "aceita_pagamento_app" && valor && !mpConnection.connected) {
+      Alert.alert("Conecte o Mercado Pago", "Conecte sua conta Mercado Pago para aceitar pagamentos pelo app.");
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE}/motorista-app/perfil`, {
         method: "PUT",
@@ -499,6 +514,35 @@ export default function ProPerfil() {
       Alert.alert("Erro", "Sem conexão.");
     }
   };
+
+  const conectarMercadoPago = async () => {
+    setMpLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/motorista-app/mercado-pago/connect`, { method: "POST", headers: { Authorization: `Bearer ${proUser.token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.authorizeUrl) throw new Error(data.error);
+      await Linking.openURL(data.authorizeUrl);
+    } catch { Alert.alert("Mercado Pago", "Não foi possível iniciar a conexão. Tente novamente mais tarde."); }
+    setMpLoading(false);
+  };
+  const desconectarMercadoPago = () => Alert.alert("Desconectar Mercado Pago", "Pagamentos pelo app serão desativados.", [
+    { text: "Cancelar", style: "cancel" },
+    { text: "Desconectar", style: "destructive", onPress: async () => {
+      try {
+        const res = await fetch(`${API_BASE}/motorista-app/mercado-pago/disconnect`, { method: "POST", headers: { Authorization: `Bearer ${proUser.token}` } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (data.error === "marketplace_payments_pending") {
+            Alert.alert("Pagamentos pendentes", data.message || "Aguarde a conclusão dos pagamentos Mercado Pago antes de desconectar.");
+            await refreshMercadoPago();
+            return;
+          }
+          throw new Error();
+        }
+        updateLocal({ aceita_pagamento_app: false }); await refreshMercadoPago();
+      } catch { Alert.alert("Erro", "Não foi possível desconectar."); }
+    }},
+  ]);
 
   const salvarPix = async () => {
     if (!pixChave.trim() && !proUser.pix_imagem_url) {
@@ -674,6 +718,15 @@ export default function ProPerfil() {
           <Text style={styles.sectionTitle}>RECEBIMENTOS</Text>
           <View style={styles.infoRow}>
             <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={styles.infoLabel}>Mercado Pago</Text>
+              <Text style={styles.recebimentoHint}>{mpConnection.connected ? "Conta conectada e pronta para receber." : "Conecte sua conta para receber pagamentos pelo app."}</Text>
+            </View>
+            <TouchableOpacity onPress={mpConnection.connected ? desconectarMercadoPago : conectarMercadoPago} disabled={mpLoading} style={[styles.mpButton, { borderColor: mpConnection.connected ? "#EF4444" : cor }]}>
+              {mpLoading ? <ActivityIndicator color={cor} /> : <Text style={[styles.mpButtonText, { color: mpConnection.connected ? "#EF4444" : cor }]}>{mpConnection.connected ? "Desconectar" : "Conectar"}</Text>}
+            </TouchableOpacity>
+          </View>
+          <View style={styles.infoRow}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
               <Text style={styles.infoLabel}>Pagamento direto</Text>
               <Text style={styles.recebimentoHint}>Receba do cliente ao concluir o serviço.</Text>
             </View>
@@ -692,6 +745,7 @@ export default function ProPerfil() {
             <Switch
               value={proUser.aceita_pagamento_app ?? true}
               onValueChange={v => salvarRecebimento("aceita_pagamento_app", v)}
+              disabled={!mpConnection.connected}
               trackColor={{ false: "#333", true: cor + "99" }}
               thumbColor={proUser.aceita_pagamento_app ?? true ? cor : "#888"}
             />
@@ -990,6 +1044,8 @@ const styles = StyleSheet.create({
   infoLabel: { fontSize: 13, color: "#8896B0" },
   infoVal: { fontSize: 14, color: "#FFF", fontWeight: "600", maxWidth: "55%", textAlign: "right" },
   recebimentoHint: { fontSize: 11, color: "#666", marginTop: 3, lineHeight: 15 },
+  mpButton: { alignSelf: "center", borderWidth: 1, borderRadius: 9, paddingHorizontal: 10, paddingVertical: 7, minWidth: 82, alignItems: "center" },
+  mpButtonText: { fontSize: 11, fontWeight: "800" },
   docStatus: { fontSize: 13, fontWeight: "700" },
   fieldLabel: { fontSize: 12, color: "#8896B0", marginTop: 10, marginBottom: 4 },
   input: { backgroundColor: "#111", borderWidth: 1.5, borderColor: "#2A2A2A", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, color: "#FFF", fontSize: 15 },

@@ -135,6 +135,8 @@ async function paymentApiError(res: Response, fallback: string): Promise<Error> 
     saved_card_in_use: "Este cartão está vinculado a uma corrida ou entrega em andamento. Troque ou remova depois da conclusão.",
     card_requires_four_digit_cvv: "Este cartão usa CVV de 4 dígitos. Cadastre um cartão Visa, Mastercard ou Elo para confirmar com 3 dígitos.",
     saved_card_profile_not_ready: "O Mercado Pago não aprovou este cartão para cobranças futuras. Tente outro cartão.",
+    saved_card_not_supported_for_marketplace_seller: "Este cartão salvo não pode ser usado com a conta do motorista. Cadastre um novo cartão para este pagamento.",
+    marketplace_card_token_incompatible: "O Mercado Pago não aceitou este cartão para a conta do motorista. Gere um novo token e tente novamente.",
   };
   return new Error(messages[data.error] || data.message || fallback);
 }

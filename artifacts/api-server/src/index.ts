@@ -211,6 +211,41 @@ async function runStartupMigrations() {
     `INSERT INTO mercado_pago_config (id, enabled)
       VALUES (1, false)
       ON CONFLICT (id) DO NOTHING`,
+
+    // ── Mercado Pago Marketplace OAuth por motorista ────────────────────────
+    `CREATE TABLE IF NOT EXISTS motorista_mercado_pago_connections (
+      id SERIAL PRIMARY KEY,
+      motorista_id INTEGER NOT NULL UNIQUE,
+      mercado_pago_user_id TEXT,
+      encrypted_access_token TEXT,
+      encrypted_refresh_token TEXT,
+      expires_at TIMESTAMPTZ,
+      scopes TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      oauth_environment TEXT NOT NULL DEFAULT 'production',
+      revoked_at TIMESTAMPTZ,
+      invalidated_at TIMESTAMPTZ,
+      last_refresh_at TIMESTAMPTZ,
+      last_error_code TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT motorista_mp_connection_status
+        CHECK (status IN ('pending','active','invalid','revoked','disconnected'))
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS motorista_mp_connections_motorista_idx
+       ON motorista_mercado_pago_connections (motorista_id)`,
+    `CREATE TABLE IF NOT EXISTS motorista_mercado_pago_oauth_states (
+      id SERIAL PRIMARY KEY,
+      motorista_id INTEGER NOT NULL,
+      nonce TEXT NOT NULL UNIQUE,
+      oauth_environment TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS motorista_mp_oauth_states_expiry_idx
+       ON motorista_mercado_pago_oauth_states (expires_at)`,
+
     `ALTER TABLE motoristas_app ADD COLUMN IF NOT EXISTS email VARCHAR(255)`,
 
     `ALTER TABLE produtos_pdv ADD COLUMN IF NOT EXISTS tamanhos JSONB`,

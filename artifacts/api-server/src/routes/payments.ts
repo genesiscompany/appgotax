@@ -17,11 +17,11 @@ function secretKey() {
   if (!secret) throw new Error("SESSION_SECRET is required to store Mercado Pago credentials");
   return createHash("sha256").update(secret).digest();
 }
-function encryptToken(value: string) {
+export function encryptToken(value: string) {
   const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", secretKey(), iv);
   return `${iv.toString("base64url")}.${Buffer.concat([cipher.update(value, "utf8"), cipher.final()]).toString("base64url")}.${cipher.getAuthTag().toString("base64url")}`;
 }
-function decryptToken(value: string) {
+export function decryptToken(value: string) {
   const [iv, encrypted, tag] = value.split(".");
   if (!iv || !encrypted || !tag) throw new Error("Invalid encrypted credential");
   const decipher = createDecipheriv("aes-256-gcm", secretKey(), Buffer.from(iv, "base64url"));
@@ -64,12 +64,10 @@ async function mp(path: string, token: string, options: RequestInit = {}) {
   if (!response.ok) throw new MercadoPagoApiError(response.status, String(body?.code ?? body?.error ?? ""));
   return body as any;
 }
-function hostUrl(req: Request) {
-  const host = req.get("host") || "";
-  if (!/^[a-z0-9.-]+(?::\d+)?$/i.test(host)) throw new Error("Invalid request host");
-  const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0]?.trim();
-  const protocol = forwardedProto === "https" || forwardedProto === "http" ? forwardedProto : req.protocol;
-  return `${protocol}://${host}`;
+function publicApiBaseUrl() {
+  const base = (process.env.PUBLIC_API_BASE_URL || "https://api.gotaxi.com.br").replace(/\/$/, "");
+  if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(base)) throw new Error("PUBLIC_API_BASE_URL must be an HTTPS public API URL");
+  return base;
 }
 async function fees() {
   const rows = await db.execute(sql`SELECT method, percentage_basis_points FROM payment_fees`);
@@ -97,6 +95,49 @@ async function globalAccessToken() {
   const config = await globalMercadoPagoConfig();
   if (config.encryptedAccessToken) return decryptToken(config.encryptedAccessToken);
   return config.environmentAccessToken;
+}
+async function invalidateSellerConnection(motoristaId: number, code: string) {
+  await db.transaction(async tx => {
+    await tx.execute(sql`UPDATE motorista_mercado_pago_connections SET status = 'invalid', invalidated_at = NOW(),
+      last_error_code = ${code}, updated_at = NOW() WHERE motorista_id = ${motoristaId}`);
+    await tx.execute(sql`UPDATE motoristas_app SET aceita_pagamento_app = false, atualizado_em = NOW() WHERE id = ${motoristaId}`);
+  });
+}
+async function sellerAccessToken(motoristaId: number, expectedSellerUserId: string) {
+  return db.transaction(async tx => {
+    const rows = await tx.execute(sql`SELECT mercado_pago_user_id, encrypted_access_token, encrypted_refresh_token, expires_at, status
+      FROM motorista_mercado_pago_connections WHERE motorista_id = ${motoristaId} FOR UPDATE`);
+    const connection = rows.rows[0] as any;
+    if (!connection || connection.status !== "active" || !connection.encrypted_access_token) throw new Error("seller_mercado_pago_connection_required");
+    if (!expectedSellerUserId || String(connection.mercado_pago_user_id) !== expectedSellerUserId) throw new Error("seller_connection_changed");
+    if (new Date(connection.expires_at).getTime() > Date.now() + 120_000) return decryptToken(connection.encrypted_access_token);
+    if (!connection.encrypted_refresh_token || !process.env.MERCADO_PAGO_CLIENT_ID || !process.env.MERCADO_PAGO_CLIENT_SECRET) throw new Error("seller_mercado_pago_connection_expired");
+    const body = new URLSearchParams({ grant_type: "refresh_token", client_id: process.env.MERCADO_PAGO_CLIENT_ID, client_secret: process.env.MERCADO_PAGO_CLIENT_SECRET, refresh_token: decryptToken(connection.encrypted_refresh_token) });
+    const response = await fetch("https://api.mercadopago.com/oauth/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    const refreshed: any = await response.json().catch(() => ({}));
+    if (!response.ok || !refreshed.access_token) {
+      const definitive = response.status === 401 || response.status === 403 || ["invalid_grant", "invalid_token", "unauthorized"].includes(String(refreshed.error));
+      if (definitive) {
+        await tx.execute(sql`UPDATE motorista_mercado_pago_connections SET status = 'invalid', invalidated_at = NOW(), last_error_code = ${String(refreshed.error || response.status)}, updated_at = NOW() WHERE motorista_id = ${motoristaId}`);
+        await tx.execute(sql`UPDATE motoristas_app SET aceita_pagamento_app = false, atualizado_em = NOW() WHERE id = ${motoristaId}`);
+      }
+      throw new Error(definitive ? "seller_mercado_pago_refresh_invalid" : "seller_mercado_pago_refresh_unavailable");
+    }
+    await tx.execute(sql`UPDATE motorista_mercado_pago_connections SET encrypted_access_token = ${encryptToken(refreshed.access_token)},
+      encrypted_refresh_token = ${refreshed.refresh_token ? encryptToken(refreshed.refresh_token) : connection.encrypted_refresh_token},
+      expires_at = ${new Date(Date.now() + Math.max(60, Number(refreshed.expires_in || 0)) * 1000)}, last_refresh_at = NOW(), updated_at = NOW() WHERE motorista_id = ${motoristaId}`);
+    if (refreshed.user_id !== undefined && String(refreshed.user_id) !== expectedSellerUserId) throw new Error("seller_connection_changed");
+    return String(refreshed.access_token);
+  });
+}
+async function assignedServiceSeller(module: "motorista" | "entrega", referenceId: string) {
+  const result = module === "motorista"
+    ? await db.execute(sql`SELECT motorista_id FROM corridas_solicitadas WHERE corrida_id = ${Number(referenceId)}
+        AND status IN ('aceita','a_caminho','em_andamento','finalizando_pagamento','finalizada') ORDER BY id DESC LIMIT 1`)
+    : await db.execute(sql`SELECT profissional_id AS motorista_id FROM entregas_solicitadas WHERE entrega_id = ${Number(referenceId)}
+        AND status IN ('aceita','a_caminho','em_andamento','finalizando_pagamento','finalizada') ORDER BY id DESC LIMIT 1`);
+  const id = Number((result.rows[0] as any)?.motorista_id);
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 function globalCredentialsAvailable(config: Awaited<ReturnType<typeof globalMercadoPagoConfig>>) {
   return !!config.publicKey && (!!config.encryptedAccessToken || !!config.environmentAccessToken);
@@ -195,7 +236,17 @@ export async function settleServiceEarning(module: "motorista" | "entrega", refe
     const row = source.rows[0] as any;
     if (!row) throw new Error("service_professional_not_found");
     const amount = Number(row.amount) || 0;
-    const net = amount * (1 - (Number(row.percentual_repasse) || 3) / 100);
+    const transaction = transactionId ? await tx.execute(sql`SELECT payment_source, platform_fee_cents, metadata, gross_amount_cents FROM payment_transactions WHERE id = ${transactionId} FOR UPDATE`) : null;
+    const transactionRow = transaction?.rows[0] as any;
+    let feeCents = Number(transactionRow?.platform_fee_cents ?? 0);
+    if (transactionRow?.payment_source === "wallet" && transactionRow?.metadata?.internalCommission !== true) {
+      const percentage = Math.min(100, Math.max(0, Number(row.percentual_repasse ?? 0)));
+      feeCents = Math.min(Number(transactionRow.gross_amount_cents), Math.round(Number(transactionRow.gross_amount_cents) * percentage / 100));
+      await tx.execute(sql`UPDATE payment_transactions SET platform_fee_cents = ${feeCents},
+        metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ internalCommission: true, internalCommissionLegacyFallback: true, internalCommissionPercent: percentage, internalCommissionFeeCents: feeCents })}::jsonb,
+        updated_at = NOW() WHERE id = ${transactionId}`);
+    }
+    const net = amount - feeCents / 100;
     await tx.execute(sql`UPDATE motoristas_app SET total_corridas = COALESCE(total_corridas, 0) + 1,
       total_ganhos = COALESCE(total_ganhos, 0) + ${amount}, saldo = COALESCE(saldo, 0) + ${net}
       WHERE id = ${row.professional_id}`);
@@ -261,10 +312,16 @@ export async function finalizeServicePayment(module: "motorista" | "entrega", re
   if (!locked || locked.payment_source !== "mercado_pago" || locked.status !== "processing") {
     return locked;
   }
-  const config = await globalMercadoPagoConfig();
-  if (!globalIntegrationConfigured(config)) throw new Error("mercado_pago_not_configured");
-  const token = await globalAccessToken();
+  const sellerId = await assignedServiceSeller(module, referenceId);
+  if (!sellerId) throw new Error("service_seller_not_assigned");
   const metadata = (locked.metadata || {}) as Record<string, unknown>;
+  const platformFeeCents = Number(metadata.marketplaceFeeCents);
+  if (Number(metadata.motoristaId) !== sellerId || !String(metadata.sellerMercadoPagoUserId || "") ||
+    !Number.isInteger(platformFeeCents) || platformFeeCents < 0 || platformFeeCents > Number(locked.gross_amount_cents)) {
+    await db.execute(sql`UPDATE payment_transactions SET status = 'pending', updated_at = NOW() WHERE id = ${locked.id} AND status = 'processing'`);
+    throw new Error("marketplace_commission_snapshot_required");
+  }
+  const token = await sellerAccessToken(sellerId, String(metadata.sellerMercadoPagoUserId));
   if (locked.method === "card" && locked.provider_order_id) {
     try {
       const existing = await mp(`/v1/orders/${encodeURIComponent(String(locked.provider_order_id))}`, token);
@@ -292,12 +349,18 @@ export async function finalizeServicePayment(module: "motorista" | "entrega", re
     transaction_amount: Number(locked.gross_amount_cents) / 100,
     description: `Pagamento ${module} #${referenceId}`,
     external_reference: locked.external_reference,
-    notification_url: `${hostUrl(req)}/api/payments/webhook/mercado-pago`,
-    metadata: { transaction_id: locked.id },
+    notification_url: `${publicApiBaseUrl()}/api/payments/webhook/mercado-pago`,
+    metadata: { transaction_id: locked.id, motorista_id: sellerId },
+    marketplace_fee: platformFeeCents / 100,
   };
   try {
     if (locked.method === "pix") {
       payload.payment_method_id = "pix";
+      payload.payer = { email: String(metadata.payerEmail || "customer@gotaxi.app") };
+    } else if (locked.method === "card" && typeof locked.encrypted_payment_token === "string") {
+      // The SDK/CardForm token is one-use. Never submit the platform's saved
+      // customer/card identifiers to an OAuth seller account.
+      payload.token = decryptToken(locked.encrypted_payment_token);
       payload.payer = { email: String(metadata.payerEmail || "customer@gotaxi.app") };
     } else if (locked.method === "card" && typeof metadata.mercadoPagoCustomerId === "string" &&
       typeof metadata.mercadoPagoCardId === "string" && typeof locked.encrypted_payment_token === "string") {
@@ -349,6 +412,16 @@ export async function finalizeServicePayment(module: "motorista" | "entrega", re
     const result = { ...locked, provider_payment_id: String(payment.id), status: normalizedStatus, pix: normalizedStatus === "pending" ? pix : null };
     return result;
   } catch (error) {
+    if (error instanceof MercadoPagoApiError && (error.status === 401 || error.status === 403)) {
+      await invalidateSellerConnection(sellerId, error.providerCode || String(error.status));
+    }
+    if (locked.method === "card" && error instanceof MercadoPagoApiError && [400, 422].includes(error.status)) {
+      const failure = { provider: "mercado_pago", httpStatus: error.status, code: "marketplace_card_token_incompatible" };
+      await db.execute(sql`UPDATE payment_transactions SET status = 'rejected', encrypted_payment_token = NULL,
+        metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ paymentFailure: failure })}::jsonb,
+        updated_at = NOW() WHERE id = ${locked.id} AND status = 'processing'`);
+      return { ...locked, status: "rejected", failure: failure.code };
+    }
     if (locked.method === "card" && error instanceof MercadoPagoApiError && error.status === 402) {
       const failure = {
         provider: "mercado_pago",
@@ -612,7 +685,7 @@ router.post("/wallet/topup", requireCustomer, async (req, res) => {
     const token = await globalAccessToken();
     if (!token) { missingCredentials(res); return; }
     const externalReference = `wallet-topup:${(req as any).customerId}:${randomUUID()}`;
-    const base = hostUrl(req);
+    const base = publicApiBaseUrl();
     const preference = await mp("/checkout/preferences", token, { method: "POST", body: JSON.stringify({ items: [{ title: "Recarga de carteira", quantity: 1, unit_price: amountCents / 100, currency_id: "BRL" }], external_reference: externalReference, notification_url: `${base}/api/payments/webhook/mercado-pago`, back_urls: { success: `${base}/`, failure: `${base}/`, pending: `${base}/` }, auto_return: "approved" }) });
     const tx = await db.execute(sql`INSERT INTO payment_transactions (customer_id, module, reference_id, payment_source, method, status, gross_amount_cents, platform_fee_cents, provider_preference_id, init_point, sandbox_init_point, external_reference, idempotency_key)
       VALUES (${(req as any).customerId}, 'wallet_topup', ${externalReference}, 'mercado_pago', 'wallet', 'pending', ${amountCents}, 0, ${preference.id ?? null}, ${preference.init_point ?? null}, ${preference.sandbox_init_point ?? null}, ${externalReference}, ${`topup:${externalReference}`}) RETURNING id`);
@@ -655,7 +728,12 @@ router.post("/checkout", requireCustomer, async (req, res) => {
     const externalReference = method === "card"
       ? `svc-${Number(referenceId)}-${attempt}`
       : `service_${module}_${referenceId}`;
-    const feeCents = Math.round(order.amountCents * (await fees())[method] / 10000);
+    // Method fees are processing/customer pricing, never the Marketplace commission.
+    // Snapshot the driver's configured GoTaxi commission only when a seller is assigned.
+    const stagedSellerId = await assignedServiceSeller(module as "motorista" | "entrega", referenceId);
+    const stagedCommission = stagedSellerId ? await db.execute(sql`SELECT percentual_repasse FROM motoristas_app WHERE id = ${stagedSellerId} LIMIT 1`) : null;
+    const stagedPercent = stagedSellerId ? Math.min(100, Math.max(0, Number((stagedCommission?.rows[0] as any)?.percentual_repasse ?? 0))) : null;
+    const feeCents = stagedPercent === null ? 0 : Math.min(order.amountCents, Math.round(order.amountCents * stagedPercent / 100));
     const cardMetadata = method === "card" ? {
       payerEmail,
       mercadoPagoCustomerId: String(savedCard.mercado_pago_customer_id),
@@ -664,6 +742,11 @@ router.post("/checkout", requireCustomer, async (req, res) => {
       paymentType: String(savedCard.payment_type),
       paymentAttempt: attempt,
     } : {};
+    const marketplaceMetadata = stagedPercent === null ? {} : {
+      motoristaId: stagedSellerId,
+      marketplaceCommissionPercent: stagedPercent,
+      marketplaceFeeCents: feeCents,
+    };
     const staged = await db.transaction(async tx => {
       const previous = await tx.execute(sql`SELECT id, customer_id, status, payment_source, method FROM payment_transactions
         WHERE module = ${module} AND reference_id = ${referenceId} FOR UPDATE`);
@@ -678,14 +761,14 @@ router.post("/checkout", requireCustomer, async (req, res) => {
             provider_order_id = NULL, provider_payment_id = NULL,
             external_reference = ${externalReference}, idempotency_key = ${idempotencyKey},
             encrypted_payment_token = ${encryptToken(paymentToken)},
-            metadata = ${JSON.stringify(cardMetadata)}::jsonb, updated_at = NOW()
+            metadata = ${JSON.stringify({ ...cardMetadata, ...marketplaceMetadata })}::jsonb, updated_at = NOW()
             WHERE id = ${current.id} AND status = 'rejected' RETURNING id`);
           return { row: reset.rows[0], reset: true };
         }
         return { row: current, reset: false };
       }
       const inserted = await tx.execute(sql`INSERT INTO payment_transactions (empresa_id, customer_id, module, reference_id, payment_source, method, status, gross_amount_cents, platform_fee_cents, external_reference, idempotency_key, encrypted_payment_token, metadata)
-        VALUES (${order.empresaId}, ${customerId}, ${module}, ${referenceId}, ${paymentSource}, ${paymentSource === "wallet" ? "wallet" : method}, 'pending', ${order.amountCents}, ${feeCents}, ${externalReference}, ${idempotencyKey}, ${method === "card" ? encryptToken(paymentToken) : null}, ${JSON.stringify(cardMetadata)}::jsonb) RETURNING id`);
+        VALUES (${order.empresaId}, ${customerId}, ${module}, ${referenceId}, ${paymentSource}, ${paymentSource === "wallet" ? "wallet" : method}, 'pending', ${order.amountCents}, ${feeCents}, ${externalReference}, ${idempotencyKey}, ${method === "card" ? encryptToken(paymentToken) : null}, ${JSON.stringify({ ...cardMetadata, ...marketplaceMetadata })}::jsonb) RETURNING id`);
       return { row: inserted.rows[0], reset: false, created: true };
     });
     if (staged.conflict) { res.status(409).json({ error: staged.conflict }); return; }
@@ -817,7 +900,20 @@ router.post("/webhook/mercado-pago", async (req, res) => {
   try {
     const recorded = await db.execute(sql`INSERT INTO mercado_pago_webhook_events (provider_event_id, provider_payment_id, event_type) VALUES (${eventId}, ${providerObjectId}, ${eventType}) ON CONFLICT (provider_event_id) DO NOTHING RETURNING id`);
     if (!recorded.rows[0]) { res.json({ received: true, duplicate: true, ...BETA }); return; }
-    const token = await globalAccessToken();
+    // Seller identity comes only from our persisted transaction, never webhook data.
+    const known = await db.execute(sql`SELECT metadata, module FROM payment_transactions
+      WHERE provider_payment_id = ${isOrderEvent ? null : providerObjectId}
+         OR provider_order_id = ${isOrderEvent ? providerObjectId : null} LIMIT 1`);
+    const knownTransaction = known.rows[0] as any;
+    if (!knownTransaction) {
+      await db.execute(sql`DELETE FROM mercado_pago_webhook_events WHERE provider_event_id = ${eventId}`);
+      res.status(503).json({ error: "payment_transaction_not_yet_correlated" });
+      return;
+    }
+    const knownSellerId = Number(knownTransaction.metadata?.motoristaId);
+    const token = ["motorista", "entrega"].includes(String(knownTransaction.module))
+      ? await sellerAccessToken(knownSellerId, String(knownTransaction.metadata?.sellerMercadoPagoUserId || ""))
+      : await globalAccessToken();
     if (!token) {
       await db.execute(sql`DELETE FROM mercado_pago_webhook_events WHERE provider_event_id = ${eventId}`);
       missingCredentials(res);
