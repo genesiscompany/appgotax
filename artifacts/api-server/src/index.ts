@@ -1,5 +1,6 @@
 import app from "./app";
 import { db } from "@workspace/db";
+import { sql } from "drizzle-orm";
 
 const rawPort = process.env["PORT"];
 
@@ -477,6 +478,20 @@ async function runStartupMigrations() {
       // Constraint already exists — safe to ignore
     }
   }
+
+  const superAdminEmail = process.env["SUPER_ADMIN_EMAIL"]?.trim();
+  if (superAdminEmail) {
+    const restored = await db.execute(sql`
+      UPDATE usuarios
+      SET papel = 'admin', ativo = true
+      WHERE LOWER(TRIM(email)) = LOWER(${superAdminEmail})
+      RETURNING id
+    `);
+    if (restored.rows.length === 0) {
+      console.warn("SUPER_ADMIN_EMAIL is configured, but no matching user was found");
+    }
+  }
+
   console.log("Startup migrations done");
 }
 
