@@ -181,6 +181,74 @@ function parseOauthState(value: string) {
   if (!Number.isInteger(motoristaId) || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || !nonce || !["sandbox", "production"].includes(environment)) return null;
   return { motoristaId, nonce, environment, expiresAt };
 }
+
+function mercadoPagoConnectedHtml() {
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mercado Pago conectado — GoTaxi</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: #0b0d10;
+      color: #f8fafc;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(100%, 420px);
+      padding: 32px 24px;
+      border: 1px solid #252a33;
+      border-radius: 20px;
+      background: #15181e;
+      text-align: center;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .35);
+    }
+    .check {
+      display: grid;
+      place-items: center;
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 20px;
+      border-radius: 50%;
+      background: #16a34a;
+      font-size: 34px;
+      font-weight: 800;
+    }
+    h1 { margin: 0 0 10px; font-size: 24px; }
+    p { margin: 0 0 26px; color: #aab2c0; line-height: 1.5; }
+    a, button {
+      display: block;
+      width: 100%;
+      padding: 14px 18px;
+      border: 0;
+      border-radius: 12px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    a { background: #f59e0b; color: #111827; text-decoration: none; }
+    button { margin-top: 10px; background: transparent; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="check" aria-hidden="true">✓</div>
+    <h1>Mercado Pago conectado</h1>
+    <p>Sua conta foi vinculada com sucesso. Volte ao GoTaxi para continuar.</p>
+    <a href="saas-mobile://pro/perfil">Voltar ao GoTaxi</a>
+    <button type="button" onclick="window.close()">Fechar esta página</button>
+  </main>
+</body>
+</html>`;
+}
+
 async function snapshotServiceCommission(tx: any, module: "motorista" | "entrega", referenceId: number, motoristaId: number) {
   const intent = await tx.execute(sql`SELECT id, payment_source, gross_amount_cents FROM payment_transactions
     WHERE module = ${module} AND reference_id = ${String(referenceId)} FOR UPDATE`);
@@ -291,7 +359,7 @@ router.get("/mercado-pago/callback", async (req, res) => {
       return "connected";
     });
     if (connected === "state_invalid") { res.status(400).send("Conexão Mercado Pago já utilizada ou expirada."); return; }
-    res.type("html").send("<!doctype html><title>GoTaxi</title><p>Mercado Pago conectado. Você já pode voltar ao GoTaxi Pro.</p>");
+    res.type("html").send(mercadoPagoConnectedHtml());
   } catch (err) {
     if (err instanceof Error && err.message === "marketplace_payments_pending") {
       res.status(409).type("html").send("<!doctype html><title>GoTaxi</title><p>Não é possível trocar a conta Mercado Pago enquanto há pagamentos pendentes. Aguarde a conclusão ou reconciliação e tente novamente.</p>");
