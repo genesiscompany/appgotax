@@ -235,7 +235,7 @@ router.post("/mercado-pago/connect", async (req, res) => {
     await db.execute(sql`DELETE FROM motorista_mercado_pago_oauth_states WHERE expires_at < NOW()`);
     await db.execute(sql`INSERT INTO motorista_mercado_pago_oauth_states (motorista_id, nonce, oauth_environment, expires_at)
       VALUES (${motoristaId}, ${nonce}, ${environment}, ${new Date(expiresAt)})`);
-    const authorizeUrl = new URL("https://auth.mercadopago.com.br/authorization");
+    const authorizeUrl = new URL("https://auth.mercadopago.com/authorization");
     authorizeUrl.search = new URLSearchParams({ client_id: clientId, response_type: "code", platform_id: "mp", redirect_uri: oauthCallbackUrl(), state: signOauthState(motoristaId, nonce, environment, expiresAt) }).toString();
     res.json({ authorizeUrl: authorizeUrl.toString() });
   } catch (err) { (req as any).log?.error({ err }, "Mercado Pago OAuth start failed"); res.status(500).json({ error: "mercado_pago_oauth_start_failed" }); }
