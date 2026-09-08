@@ -5,17 +5,14 @@ import { eq, sql } from "drizzle-orm";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads", "avatares");
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+import { uploadImageToGCS } from "../lib/uploadImage";
+import { issueCustomerToken, verifyCustomerToken } from "../lib/customerToken";
+
+const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const avatarUpload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-    filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname) || ".jpg";
-      cb(null, `avatar_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (file.mimetype.startsWith("image/")) cb(null, true);
@@ -39,7 +36,9 @@ router.post("/login", async (req, res) => {
 
     const empresa = await db.select().from(empresasTable).where(eq(empresasTable.id, usuario[0].empresaId)).limit(1);
 
-    const token = Buffer.from(`${usuario[0].id}:${usuario[0].empresaId}:${Date.now()}`).toString("base64");
+    const token = usuario[0].papel === "cliente"
+      ? issueCustomerToken(usuario[0].id)
+      : Buffer.from(`${usuario[0].id}:${usuario[0].empresaId}:${Date.now()}`).toString("base64");
 
     return res.json({
       token,
@@ -76,10 +75,8 @@ router.patch("/cliente-perfil", async (req, res) => {
   try {
     const { token, nome, telefone, novaSenha, endereco, formaPagamento } = req.body;
     if (!token) return res.status(401).json({ error: "unauthorized", message: "Token obrigatório" });
-    const decoded = Buffer.from(token, "base64").toString("utf-8");
-    const match = decoded.match(/^cl_(\d+):/);
-    if (!match) return res.status(401).json({ error: "unauthorized", message: "Token inválido" });
-    const userId = Number(match[1]);
+    const userId = verifyCustomerToken(token);
+    if (!userId) return res.status(401).json({ error: "unauthorized", message: "Token inválido ou expirado" });
 
     const drizzleUpdates: Record<string, string | null> = {};
     if (nome?.trim()) drizzleUpdates.nome = nome.trim();
@@ -122,11 +119,8 @@ router.get("/cliente-validar", async (req, res) => {
   try {
     const token = String(req.query.token || "");
     if (!token) return res.status(401).json({ error: "unauthorized", message: "Token ausente" });
-    let decoded = "";
-    try { decoded = Buffer.from(token, "base64").toString("utf-8"); } catch { return res.status(401).json({ error: "unauthorized" }); }
-    const match = decoded.match(/^cl_(\d+):/);
-    if (!match) return res.status(401).json({ error: "unauthorized", message: "Token inválido" });
-    const userId = Number(match[1]);
+    const userId = verifyCustomerToken(token);
+    if (!userId) return res.status(401).json({ error: "unauthorized", message: "Token inválido ou expirado" });
     if (!userId || userId <= 0) return res.status(401).json({ error: "unauthorized" });
     const [usuario] = await db.select().from(usuariosTable).where(eq(usuariosTable.id, userId)).limit(1);
     if (!usuario || usuario.papel !== "cliente") return res.status(401).json({ error: "unauthorized", message: "Cadastro não encontrado" });
@@ -169,7 +163,7 @@ router.post("/cliente-login", async (req, res) => {
     if (usuario.senhaHash !== senha) {
       return res.status(401).json({ error: "unauthorized", message: "Senha incorreta" });
     }
-    const token = Buffer.from(`cl_${usuario.id}:${Date.now()}`).toString("base64");
+    const token = issueCustomerToken(usuario.id);
     const referralRow = (await db.execute(sql`
       SELECT u.codigo_referral, EXISTS(SELECT 1 FROM afiliados a WHERE a.usuario_id = u.id) AS is_afiliado
       FROM usuarios u WHERE u.id = ${usuario.id}
@@ -236,7 +230,7 @@ router.post("/cliente-register", async (req, res) => {
     }).returning();
     const codigo_referral = gerarCodigoReferralU(novoUsuario.nome, novoUsuario.id);
     await db.execute(sql`UPDATE usuarios SET codigo_referral = ${codigo_referral}, indicado_por = ${indicado_por || null} WHERE id = ${novoUsuario.id} AND codigo_referral IS NULL`);
-    const token = Buffer.from(`cl_${novoUsuario.id}:${Date.now()}`).toString("base64");
+    const token = issueCustomerToken(novoUsuario.id);
     return res.status(201).json({
       token,
       usuario: {
@@ -279,7 +273,7 @@ router.post("/register", async (req, res) => {
     }).returning();
 
     const empresa = await db.select().from(empresasTable).where(eq(empresasTable.id, novoUsuario.empresaId)).limit(1);
-    const token = Buffer.from(`${novoUsuario.id}:${novoUsuario.empresaId}:${Date.now()}`).toString("base64");
+    const token = issueCustomerToken(novoUsuario.id);
 
     return res.status(201).json({
       token,
@@ -300,14 +294,12 @@ router.post("/cliente-avatar", avatarUpload.single("avatar"), async (req: any, r
   try {
     const { token } = req.body;
     if (!token) return res.status(401).json({ error: "unauthorized", message: "Token obrigatório" });
-    const decoded = Buffer.from(token, "base64").toString("utf-8");
-    const match = decoded.match(/^cl_(\d+):/);
-    if (!match) return res.status(401).json({ error: "unauthorized", message: "Token inválido" });
-    const userId = Number(match[1]);
+    const userId = verifyCustomerToken(token);
+    if (!userId) return res.status(401).json({ error: "unauthorized", message: "Token inválido ou expirado" });
 
     if (!req.file) return res.status(400).json({ error: "bad_request", message: "Nenhuma imagem enviada" });
 
-    const avatarPath = `/uploads/avatares/${req.file.filename}`;
+    const avatarPath = await uploadImageToGCS(req.file.buffer, req.file.originalname, "avatares");
 
     await db.update(usuariosTable).set({ avatar: avatarPath } as any).where(eq(usuariosTable.id, userId));
     return res.json({ avatar: avatarPath });
