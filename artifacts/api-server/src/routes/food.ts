@@ -4,6 +4,7 @@ import { restaurantesTable, itensCardapioTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { broadcastToEmpresa, sendExpoPushToEmpresa } from "./pdv";
+import { productImagePublicUrl } from "../lib/uploadImage";
 
 function decodeClienteToken(token: string): number | null {
   try {
@@ -268,7 +269,7 @@ router.get("/promocoes", async (req, res) => {
       ORDER BY pr.criado_em DESC
       LIMIT 40
     `);
-    return res.json(rows.rows);
+    return res.json(rows.rows.map((row: any) => ({ ...row, produto_imagem: productImagePublicUrl(row.produto_imagem) })));
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "server_error" });
@@ -444,6 +445,7 @@ router.get("/parceiros/:empresaId/cardapio", async (req, res) => {
     // Garantir que grupos e tamanhos sejam arrays parseados (não strings JSON)
     const produtosNormalizados = (produtos.rows as any[]).map(p => ({
       ...p,
+      imagem: productImagePublicUrl(p.imagem),
       grupos: typeof p.grupos === "string" ? JSON.parse(p.grupos) : (Array.isArray(p.grupos) ? p.grupos : []),
       tamanhos: typeof p.tamanhos === "string" ? JSON.parse(p.tamanhos) : (Array.isArray(p.tamanhos) ? p.tamanhos : null),
       extras: typeof p.extras === "string" ? JSON.parse(p.extras) : (Array.isArray(p.extras) ? p.extras : []),

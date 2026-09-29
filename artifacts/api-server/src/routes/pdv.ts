@@ -5,7 +5,7 @@ import { eq, desc, and, sql } from "drizzle-orm";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { uploadImageToGCS } from "../lib/uploadImage";
+import { uploadImageToGCS, productImagePublicUrl } from "../lib/uploadImage";
 import { sendFcmNotification } from "./motorista-app";
 import { decodeClienteTokenFromReq, gerarComissaoCliente } from "../lib/comissaoAfiliado";
 import { createPdvToken, verifyPdvFinancialToken } from "../lib/pdvFinancialAuth";
@@ -737,7 +737,7 @@ router.get("/produtos", async (req, res) => {
       GROUP BY p.id, c.nome
       ORDER BY c.nome NULLS LAST, p.nome
     `);
-    return res.json(rows.rows);
+    return res.json(rows.rows.map((row: any) => ({ ...row, imagem: productImagePublicUrl(row.imagem) })));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -776,7 +776,7 @@ router.post("/produtos/:id/imagem", productImageUpload.single("imagem"), async (
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
     const file = (req as any).file;
     if (!file) return res.status(400).json({ error: "no_file", message: "Nenhum ficheiro enviado" });
-    const imageUrl = await uploadImageToGCS(file.buffer, file.originalname, "produtos");
+    const imageUrl = productImagePublicUrl(await uploadImageToGCS(file.buffer, file.originalname, "produtos"));
     await db.execute(`UPDATE produtos_pdv SET imagem = '${imageUrl}' WHERE id = ${Number(req.params.id)} AND empresa_id = ${empresaId}`);
     return res.json({ imagem: imageUrl });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
@@ -1005,7 +1005,7 @@ router.get("/promocoes", async (req, res) => {
       WHERE pr.empresa_id = ${empresaId}
       ORDER BY pr.criado_em DESC
     `);
-    return res.json(rows.rows);
+    return res.json(rows.rows.map((row: any) => ({ ...row, produto_imagem: productImagePublicUrl(row.produto_imagem) })));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 

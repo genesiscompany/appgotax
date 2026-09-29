@@ -1,3 +1,4 @@
+import { productImagePublicUrl } from "../lib/uploadImage";
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
@@ -241,7 +242,7 @@ router.get("/ecommerce/:empresaId/produtos", async (req, res) => {
       WHERE p.empresa_id = ${empresaId} AND p.ativo = true
       ORDER BY COALESCE(c.nome, 'Geral'), p.nome
     `);
-    return res.json(rows.rows);
+    return res.json(rows.rows.map((row: any) => ({ ...row, imagem: productImagePublicUrl(row.imagem) })));
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "server_error" });

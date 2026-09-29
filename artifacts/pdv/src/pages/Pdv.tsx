@@ -17,6 +17,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { useAppStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
+import { productImageUrl } from "@/lib/productImageUrl";
 import { useOrders } from "@/lib/useOrders";
 import { printCupom } from "@/lib/print";
 import { AddressAutocomplete } from "@/components/AddressAutocomplete";
@@ -76,7 +77,7 @@ function usePdvProdutos(token: string | null, empresaId: number | null, enabled:
             name: p.nome ?? p.name ?? "",
             cat: p.categoria_nome ?? p.categoria ?? "Geral",
             price: Number(p.preco ?? 0),
-            image: p.imagem ?? null,
+            image: productImageUrl(p.imagem),
             extras: Array.isArray(p.extras)
               ? p.extras.map((e: any) => ({ id: Number(e.id), nome: String(e.nome ?? ""), preco: Number(e.preco ?? 0) }))
               : [],

@@ -43,7 +43,9 @@ function resolvePublic(rel: string): string {
   return candidates[0];
 }
 
-const UPLOADS_PATH = resolvePublic("public/uploads");
+const UPLOADS_PATH = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : resolvePublic("public/uploads");
 const SOUNDS_PATH = resolvePublic("public/sounds");
 console.log("[static] uploads:", UPLOADS_PATH, "sounds:", SOUNDS_PATH);
 

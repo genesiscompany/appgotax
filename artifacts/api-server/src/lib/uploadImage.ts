@@ -8,6 +8,19 @@ const LOCAL_UPLOADS_DIR = process.env.UPLOADS_DIR
   ? path.resolve(process.env.UPLOADS_DIR)
   : path.resolve(process.cwd(), "public", "uploads");
 
+// Product images uploaded by the API cannot be resolved against the PDV host.
+// Keep legacy /uploads/produtos URLs untouched: those may still live on PDV.
+export function productImagePublicUrl(image: string | null | undefined): string | null {
+  if (!image || !image.startsWith("/api/uploads/produtos/") && !image.startsWith("/api/images/produtos/")) {
+    return image ?? null;
+  }
+  const base = (process.env.PUBLIC_API_BASE_URL || "https://api.gotaxi.com.br").replace(/\/$/, "");
+  if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(base)) {
+    throw new Error("PUBLIC_API_BASE_URL must be a valid HTTPS API origin");
+  }
+  return `${base}${image}`;
+}
+
 async function uploadImageLocally(
   buffer: Buffer,
   originalName: string,
