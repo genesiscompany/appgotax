@@ -27,6 +27,8 @@ tags:
     description: Módulo Entrega
   - name: food
     description: Módulo Food
+  - name: payments
+    description: Mercado Pago and wallet beta payments
 
 paths:
   /healthz:
@@ -371,6 +373,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Entrega"
+  /public/entrega/solicitar:
+    post:
+      operationId: requestPublicDelivery
+      tags: [entrega]
+      summary: Solicita entrega com preço recalculado autoritativamente pelo servidor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublicDeliveryInput"
+      responses:
+        "201": { description: Entrega criada e enviada ao dispatch }
+        "401": { description: Token assinado obrigatório para pagamento pelo app }
 
   /food/restaurantes:
     get:
@@ -408,8 +424,319 @@ paths:
                 items:
                   $ref: "#/components/schemas/ItemCardapio"
 
+  /payments/options/{empresaId}:
+    get:
+      operationId: getPaymentOptions
+      tags: [payments]
+      parameters:
+        - name: empresaId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Public receiving options (beta)
+          content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOptions" } } }
+  /payments/partner-config:
+    get:
+      operationId: getPartnerPaymentConfig
+      tags: [payments]
+      responses: { "200": { description: Partner payment status without credentials } }
+  /payments/partner-options:
+    put:
+      operationId: updatePartnerPaymentOptions
+      tags: [payments]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PartnerPaymentOptionsInput" } } }
+      responses: { "200": { description: Saved partner payment options } }
+  /payments/admin/partner-config/{empresaId}:
+    get:
+      operationId: getAdminPartnerPaymentConfig
+      tags: [payments]
+      parameters:
+        - name: empresaId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses: { "200": { description: Partner payment options using the global Mercado Pago account } }
+    put:
+      operationId: updateAdminPartnerPaymentConfig
+      tags: [payments]
+      parameters:
+        - name: empresaId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AdminPartnerPaymentConfigInput" } } }
+      responses: { "200": { description: Saved partner payment options } }
+  /payments/admin/config:
+    get:
+      operationId: getGlobalMercadoPagoConfig
+      tags: [payments]
+      responses: { "200": { description: Global Mercado Pago configuration without Access Token } }
+    put:
+      operationId: updateGlobalMercadoPagoConfig
+      tags: [payments]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/GlobalMercadoPagoConfigInput" } } }
+      responses: { "200": { description: Saved global Mercado Pago configuration } }
+  /payments/admin/fees:
+    get:
+      operationId: getPaymentFees
+      tags: [payments]
+      responses: { "200": { description: Payment fees } }
+    put:
+      operationId: updatePaymentFees
+      tags: [payments]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PaymentFeesInput" } } }
+      responses: { "200": { description: Saved fees } }
+  /payments/wallet:
+    get:
+      operationId: getWallet
+      tags: [payments]
+      responses: { "200": { description: Wallet balance } }
+  /payments/cards/config:
+    get:
+      operationId: getSavedCardConfig
+      tags: [payments]
+      summary: Mercado Pago SDK configuration for an authenticated customer
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Public SDK configuration
+          content: { application/json: { schema: { $ref: "#/components/schemas/SavedCardConfig" } } }
+  /payments/cards:
+    get:
+      operationId: getSavedCard
+      tags: [payments]
+      summary: Get the authenticated customer's saved card
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Masked saved card, or null when none is saved
+          content: { application/json: { schema: { $ref: "#/components/schemas/SavedCardResponse" } } }
+    post:
+      operationId: saveCard
+      tags: [payments]
+      summary: Save an official Mercado Pago SDK one-use card token
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SavedCardInput" } } }
+      responses:
+        "201":
+          description: Masked saved card
+          content: { application/json: { schema: { $ref: "#/components/schemas/SavedCard" } } }
+  /payments/cards/{cardId}:
+    delete:
+      operationId: deleteSavedCard
+      tags: [payments]
+      summary: Delete the authenticated customer's saved card
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: cardId, in: path, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        "204": { description: Card deleted }
+        "404": { description: Card not found }
+  /payments/wallet/ledger:
+    get:
+      operationId: getWalletLedger
+      tags: [payments]
+      responses: { "200": { description: Wallet ledger } }
+  /payments/wallet/topup:
+    post:
+      operationId: createWalletTopup
+      tags: [payments]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WalletTopupInput" } } }
+      responses: { "201": { description: Pix charge created with copy-and-paste code and optional QR image } }
+  /payments/wallet/topup/pending:
+    get:
+      operationId: getPendingWalletTopup
+      tags: [payments]
+      security: [{ bearerAuth: [] }]
+      responses: { "200": { description: "Latest pending Pix wallet recharge or null" } }
+  /payments/checkout:
+    post:
+      operationId: createPaymentCheckout
+      tags: [payments]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CheckoutInput" } } }
+      responses:
+        "201": { description: Payment staged; a rejected card attempt may also be reset with a fresh token }
+        "400": { description: Invalid checkout request or card payment token }
+        "403": { description: Service is not owned by the authenticated customer }
+        "404": { description: Authoritative service amount not found }
+        "409": { description: "Existing intent cannot be reset, saved card is missing, or service is not eligible" }
+  /payments/services/{module}/{referenceId}/cancel:
+    post:
+      operationId: cancelCustomerService
+      tags: [payments]
+      summary: Cancela serviço pertencente ao cliente autenticado enquanto ainda cancelável
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: module, in: path, required: true, schema: { type: string, enum: [motorista, entrega] } }
+        - { name: referenceId, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: Serviço e atribuições cancelados }
+        "404": { description: Serviço não encontrado para o cliente }
+        "409": { description: Estado não cancelável }
+  /payments/services/{module}/{referenceId}/status:
+    get:
+      operationId: getCustomerServicePaymentStatus
+      tags: [payments]
+      summary: Consulta pagamento e Pix sanitizado de serviço pertencente ao cliente
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: module, in: path, required: true, schema: { type: string, enum: [motorista, entrega] } }
+        - { name: referenceId, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Estado do pagamento
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServicePaymentStatus"
+        "404": { description: Serviço não encontrado para o cliente }
+        "502": { description: A consulta read-only da order ao Mercado Pago falhou ou retornou referência/valor incompatível }
+  /payments/webhook/mercado-pago:
+    post:
+      operationId: mercadoPagoWebhook
+      tags: [payments]
+      responses: { "200": { description: Webhook received } }
+  /payments/transactions/{id}:
+    get:
+      operationId: getPaymentTransaction
+      tags: [payments]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { "200": { description: Transaction status } }
+  /payments/partner-transactions:
+    get:
+      operationId: listPartnerPaymentTransactions
+      tags: [payments]
+      responses: { "200": { description: Partner payment transactions } }
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
   schemas:
+    PaymentOptions:
+      type: object
+      properties:
+        empresaId: { type: integer }
+        mercadoPago: { type: boolean }
+        directPayment: { type: boolean }
+        wallet: { type: boolean }
+        beta: { type: boolean }
+        sandbox: { type: boolean }
+    PartnerPaymentOptionsInput:
+      type: object
+      properties:
+        mercadoPagoEnabled: { type: boolean }
+        directPaymentEnabled: { type: boolean }
+      required: [mercadoPagoEnabled, directPaymentEnabled]
+    AdminPartnerPaymentConfigInput:
+      type: object
+      properties:
+        mercadoPagoEnabled: { type: boolean }
+        directPaymentEnabled: { type: boolean }
+    GlobalMercadoPagoConfigInput:
+      type: object
+      properties:
+        publicKey: { type: string }
+        accessToken: { type: string, writeOnly: true }
+        enabled: { type: boolean }
+      required: [publicKey, enabled]
+    PaymentFeesInput:
+      type: object
+      properties:
+        pix: { type: integer, description: Percentage in basis points }
+        card: { type: integer, description: Percentage in basis points }
+        wallet: { type: integer, description: Percentage in basis points }
+      required: [pix, card, wallet]
+    WalletTopupInput:
+      type: object
+      properties:
+        amountCents: { type: integer, minimum: 100 }
+      required: [amountCents]
+    SavedCardConfig:
+      type: object
+      properties:
+        publicKey: { type: string }
+        sandbox: { type: boolean }
+      required: [publicKey, sandbox]
+    SavedCard:
+      type: object
+      properties:
+        cardId: { type: string }
+        lastFour: { type: string, pattern: '^\d{4}$' }
+        paymentMethod: { type: string }
+        brand: { type: string }
+        expirationMonth: { type: integer, minimum: 1, maximum: 12 }
+        expirationYear: { type: integer }
+      required: [cardId, lastFour, paymentMethod, brand, expirationMonth, expirationYear]
+    SavedCardResponse:
+      type: object
+      properties:
+        card:
+          oneOf:
+            - $ref: "#/components/schemas/SavedCard"
+            - type: "null"
+      required: [card]
+    SavedCardInput:
+      type: object
+      additionalProperties: false
+      properties:
+        cardToken:
+          type: string
+          minLength: 8
+          writeOnly: true
+          description: Opaque one-use token created by the official Mercado Pago SDK.
+      required: [cardToken]
+    CheckoutInput:
+      type: object
+      additionalProperties: false
+      properties:
+        module: { type: string }
+        referenceId: { type: string }
+        paymentSource: { type: string, enum: [mercado_pago, wallet, carteira], description: carteira is accepted as a legacy input alias and normalized to wallet }
+        mercadoPagoMethod: { type: string, enum: [pix, card, wallet] }
+        payerEmail: { type: string, format: email }
+        paymentToken:
+          type: string
+          minLength: 8
+          maxLength: 512
+          writeOnly: true
+          description: One-use token created client-side by the Mercado Pago SDK from the authenticated customer's saved card and CVV. Required when mercadoPagoMethod is card; never stored after payment creation.
+      required: [module, referenceId, paymentSource, mercadoPagoMethod]
+    ServicePaymentStatus:
+      type: object
+      properties:
+        module: { type: string, enum: [motorista, entrega] }
+        referenceId: { type: integer }
+        paymentSource: { type: string, enum: [direto, mercado_pago, wallet] }
+        paymentStatus: { type: string, enum: [direto, pendente, pago, rejeitado] }
+        status: { type: string }
+        method: { type: [string, "null"] }
+        pix:
+          type: [object, "null"]
+          properties:
+            qrCode: { type: [string, "null"] }
+            qrCodeBase64: { type: [string, "null"] }
+            ticketUrl: { type: [string, "null"] }
+      required: [module, referenceId, paymentSource, paymentStatus, status, method, pix]
     HealthStatus:
       type: object
       properties:
@@ -602,7 +929,7 @@ components:
           type: string
         status:
           type: string
-          enum: [aguardando, aceita, em_andamento, concluida, cancelada]
+          enum: [aguardando, aceita, em_andamento, finalizando_pagamento, concluida, cancelada]
         valor:
           type: number
         distanciaKm:
@@ -611,6 +938,12 @@ components:
         motoristaNome:
           type: string
           nullable: true
+        paymentSource:
+          type: string
+          enum: [direto, mercado_pago, wallet]
+        paymentStatus:
+          type: string
+          enum: [direto, pendente, pago]
         criadoEm:
           type: string
           format: date-time
@@ -919,12 +1252,18 @@ components:
           nullable: true
         status:
           type: string
-          enum: [aguardando, coletado, em_transito, entregue, devolvido, cancelado]
+          enum: [aguardando, coletado, em_transito, finalizando_pagamento, entregue, devolvido, cancelado]
         entregadorNome:
           type: string
           nullable: true
         valor:
           type: number
+        paymentSource:
+          type: string
+          enum: [direto, mercado_pago, wallet]
+        paymentStatus:
+          type: string
+          enum: [direto, pendente, pago]
         criadoEm:
           type: string
           format: date-time
@@ -957,12 +1296,36 @@ components:
           type: string
         valor:
           type: number
+        paymentSource:
+          type: string
+          enum: [direto, mercado_pago, wallet]
       required:
         - remetenteNome
         - destinatarioNome
         - enderecoColeta
         - enderecoEntrega
         - valor
+    PublicDeliveryInput:
+      type: object
+      properties:
+        empresa_id: { type: integer }
+        remetente_nome: { type: string }
+        remetente_telefone: { type: string }
+        destinatario_nome: { type: string }
+        destinatario_telefone: { type: string }
+        endereco_coleta: { type: string }
+        endereco_entrega: { type: string }
+        descricao_pacote: { type: string }
+        categoria: { type: string, enum: [padrao, expressa, grande] }
+        distancia_km: { type: number }
+        coleta_lat: { type: number }
+        coleta_lng: { type: number }
+        entrega_lat: { type: number }
+        entrega_lng: { type: number }
+        forma_pagamento: { type: string }
+        payment_source: { type: string, enum: [direto, mercado_pago, wallet, carteira] }
+        valor: { type: number, description: Estimativa do cliente; o servidor recalcula o valor autoritativo }
+      required: [empresa_id, remetente_nome, endereco_coleta, endereco_entrega, payment_source]
 
     Restaurante:
       type: object

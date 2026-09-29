@@ -196,31 +196,13 @@ export async function getSavedCard(token: string): Promise<SavedCard | null> {
 }
 
 export async function saveCard(token: string, cardToken: string): Promise<SavedCard> {
-  let res: Response;
-  try {
-    res = await fetch(`${getApiBase()}/payments/cards`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ cardToken }),
-    });
-  } catch {
-    throw new Error("Não foi possível conectar à API para salvar o cartão. Verifique sua conexão e tente novamente.");
-  }
-  if (!res.headers.get("content-type")?.includes("application/json")) {
-    throw new Error(`A API não respondeu no formato esperado ao salvar o cartão (HTTP ${res.status}). Verifique a publicação do serviço da API.`);
-  }
-  if (!res.ok) {
-    const error = await paymentApiError(res, "Não foi possível salvar o cartão.");
-    if (error instanceof PaymentApiError && error.code === `http_${res.status}`) {
-      throw new Error(`A API recusou o cadastro do cartão (HTTP ${res.status}). Confira o serviço da API no EasyPanel.`);
-    }
-    throw error;
-  }
-  const data = await res.json();
-  if (!data?.cardId || !data?.lastFour) {
-    throw new Error("A API não confirmou o cartão salvo. Consulte o cartão cadastrado antes de tentar novamente.");
-  }
-  return data;
+  const res = await fetch(`${getApiBase()}/payments/cards`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ cardToken }),
+  });
+  if (!res.ok) throw await paymentApiError(res, "Não foi possível salvar o cartão.");
+  return res.json();
 }
 
 export async function deleteSavedCard(token: string, cardId: string): Promise<void> {

@@ -676,20 +676,48 @@ router.delete("/cards/:cardId", requireCustomer, async (req, res) => {
 });
 router.get("/wallet", requireCustomer, async (req, res) => { const r = await db.execute(sql`SELECT balance_cents FROM customer_wallet_accounts WHERE customer_id = ${(req as any).customerId} LIMIT 1`); res.json({ balanceCents: Number((r.rows[0] as any)?.balance_cents ?? 0), ...BETA }); });
 router.get("/wallet/ledger", requireCustomer, async (req, res) => { const r = await db.execute(sql`SELECT id, direction, amount_cents, balance_after_cents, description, created_at FROM customer_wallet_ledger WHERE customer_id = ${(req as any).customerId} ORDER BY id DESC LIMIT 100`); res.json({ entries: r.rows, ...BETA }); });
+router.get("/wallet/topup/pending", requireCustomer, async (req, res) => {
+  const rows = await db.execute(sql`SELECT id, gross_amount_cents, metadata FROM payment_transactions
+    WHERE customer_id = ${(req as any).customerId} AND module = 'wallet_topup' AND method = 'pix'
+      AND status IN ('pending', 'processing') AND metadata->'pix' IS NOT NULL
+    ORDER BY id DESC LIMIT 1`);
+  const row = rows.rows[0] as any;
+  const pix = sanitizedPixData(row?.metadata?.pix);
+  res.json({ topup: pix ? { transactionId: Number(row.id), amountCents: Number(row.gross_amount_cents), pix } : null });
+});
 router.post("/wallet/topup", requireCustomer, async (req, res) => {
   const amountCents = Number(req.body?.amountCents);
-  if (!Number.isInteger(amountCents) || amountCents < 100 || amountCents > 100000000) { res.status(400).json({ error: "invalid_amount_cents" }); return; }
+  if (!Number.isInteger(amountCents) || amountCents < 500 || amountCents > 100000000) { res.status(400).json({ error: "invalid_amount_cents" }); return; }
   try {
     const config = await globalMercadoPagoConfig();
     if (!globalIntegrationConfigured(config)) { missingCredentials(res); return; }
     const token = await globalAccessToken();
     if (!token) { missingCredentials(res); return; }
-    const externalReference = `wallet-topup:${(req as any).customerId}:${randomUUID()}`;
-    const base = publicApiBaseUrl();
-    const preference = await mp("/checkout/preferences", token, { method: "POST", body: JSON.stringify({ items: [{ title: "Recarga de carteira", quantity: 1, unit_price: amountCents / 100, currency_id: "BRL" }], external_reference: externalReference, notification_url: `${base}/api/payments/webhook/mercado-pago`, back_urls: { success: `${base}/`, failure: `${base}/`, pending: `${base}/` }, auto_return: "approved" }) });
+    const customerId = Number((req as any).customerId);
+    const users = await db.execute(sql`SELECT email FROM usuarios WHERE id = ${customerId} LIMIT 1`);
+    const email = String((users.rows[0] as any)?.email ?? "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { res.status(409).json({ error: "customer_email_required" }); return; }
+    const externalReference = `wallet-topup:${customerId}:${randomUUID()}`;
+    const idempotencyKey = `topup:${externalReference}`;
     const tx = await db.execute(sql`INSERT INTO payment_transactions (customer_id, module, reference_id, payment_source, method, status, gross_amount_cents, platform_fee_cents, provider_preference_id, init_point, sandbox_init_point, external_reference, idempotency_key)
-      VALUES (${(req as any).customerId}, 'wallet_topup', ${externalReference}, 'mercado_pago', 'wallet', 'pending', ${amountCents}, 0, ${preference.id ?? null}, ${preference.init_point ?? null}, ${preference.sandbox_init_point ?? null}, ${externalReference}, ${`topup:${externalReference}`}) RETURNING id`);
-    res.status(201).json({ transactionId: (tx.rows[0] as any).id, initPoint: preference.init_point ?? null, sandboxInitPoint: config.environment === "sandbox" ? preference.sandbox_init_point ?? null : null, sandbox: config.environment === "sandbox", ...BETA });
+      VALUES (${customerId}, 'wallet_topup', ${externalReference}, 'mercado_pago', 'pix', 'pending', ${amountCents}, 0, NULL, NULL, NULL, ${externalReference}, ${idempotencyKey}) RETURNING id`);
+    const transactionId = Number((tx.rows[0] as any).id);
+    const payment = await mp("/v1/payments", token, {
+      method: "POST", headers: { "X-Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({
+        transaction_amount: amountCents / 100, description: "Recarga de carteira",
+        payment_method_id: "pix", payer: { email }, external_reference: externalReference,
+        notification_url: `${publicApiBaseUrl()}/api/payments/webhook/mercado-pago`,
+      }),
+    });
+    const pix = sanitizedPixData(payment.point_of_interaction?.transaction_data);
+    const providerPaymentId = String(payment.id ?? "");
+    if (!providerPaymentId || !pix?.qrCode) throw new Error("pix_code_missing");
+    await db.execute(sql`UPDATE payment_transactions SET provider_payment_id = ${providerPaymentId},
+      metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ pix })}::jsonb,
+      updated_at = NOW() WHERE id = ${transactionId}`);
+    // Even an immediately approved provider response must be settled by the verified webhook.
+    res.status(201).json({ transactionId, amountCents, pix, status: payment.status, ...BETA });
   } catch (err) { (req as any).log?.error({ err: err instanceof Error ? err.message : "unknown" }, "payment topup failed"); res.status(502).json({ error: "mercado_pago_unavailable", message: "O Mercado Pago recusou a criação da recarga. Confira se as credenciais e o ambiente estão corretos.", ...BETA }); }
 });
 router.post("/checkout", requireCustomer, async (req, res) => {
@@ -904,7 +932,17 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     const known = await db.execute(sql`SELECT metadata, module FROM payment_transactions
       WHERE provider_payment_id = ${isOrderEvent ? null : providerObjectId}
          OR provider_order_id = ${isOrderEvent ? providerObjectId : null} LIMIT 1`);
-    const knownTransaction = known.rows[0] as any;
+    let knownTransaction = known.rows[0] as any;
+    // Pix notifications may arrive before the create-payment request persists its provider ID.
+    if (!knownTransaction && !isOrderEvent) {
+      const provisional = await mp(`/v1/payments/${encodeURIComponent(providerObjectId)}`, await globalAccessToken());
+      const reference = String(provisional.external_reference ?? "");
+      if (reference.startsWith("wallet-topup:")) {
+        const match = await db.execute(sql`SELECT metadata, module FROM payment_transactions
+          WHERE external_reference = ${reference} AND module = 'wallet_topup' LIMIT 1`);
+        knownTransaction = match.rows[0] as any;
+      }
+    }
     if (!knownTransaction) {
       await db.execute(sql`DELETE FROM mercado_pago_webhook_events WHERE provider_event_id = ${eventId}`);
       res.status(503).json({ error: "payment_transaction_not_yet_correlated" });
@@ -925,7 +963,7 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     const providerPaymentId = String(isOrderEvent ? providerObject?.transactions?.payments?.[0]?.id ?? "" : providerObjectId);
     const providerOrderId = isOrderEvent ? String(providerObject.id) : "";
     const external = String(providerObject.external_reference || "");
-    let found = await db.execute(sql`SELECT id, module, reference_id, customer_id, gross_amount_cents, status, external_reference
+    let found = await db.execute(sql`SELECT id, module, method, reference_id, customer_id, gross_amount_cents, status, external_reference
       FROM payment_transactions
       WHERE (${providerPaymentId || null}::text IS NOT NULL AND provider_payment_id = ${providerPaymentId || null})
          OR (${providerOrderId || null}::text IS NOT NULL AND provider_order_id = ${providerOrderId || null})
@@ -933,7 +971,7 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     // Provider IDs are authoritative once persisted. The external-reference
     // fallback is only for the create/webhook race and must match this attempt.
     if (!found.rows[0] && external) {
-      found = await db.execute(sql`SELECT id, module, reference_id, customer_id, gross_amount_cents, status, external_reference
+      found = await db.execute(sql`SELECT id, module, method, reference_id, customer_id, gross_amount_cents, status, external_reference
         FROM payment_transactions WHERE external_reference = ${external} LIMIT 1 FOR UPDATE`);
     }
     const transaction = found.rows[0] as any;
@@ -949,6 +987,12 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     if (TERMINAL_STATUSES.has(String(transaction.status)) && String(transaction.status) !== status) {
       res.json({ received: true, ignored: "non_monotonic_transition", ...BETA }); return;
     }
+    if (transaction.module === "wallet_topup" && status === "approved") await creditWallet({
+      customerId: Number(transaction.customer_id), amountCents: Number(transaction.gross_amount_cents),
+      transactionId: Number(transaction.id),
+      idempotencyKey: transaction.method === "pix" ? `mp-topup:${transaction.id}` : `mp-topup:${transaction.id}:${providerPaymentId}`,
+      description: transaction.method === "pix" ? "Recarga Pix Mercado Pago" : "Recarga Mercado Pago",
+    });
     await db.execute(sql`UPDATE payment_transactions SET
       provider_payment_id = COALESCE(${providerPaymentId || null}, provider_payment_id),
       provider_order_id = COALESCE(${providerOrderId || null}, provider_order_id),
@@ -959,7 +1003,6 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     await db.execute(sql`UPDATE payment_transactions SET
       metadata = CASE WHEN ${TERMINAL_STATUSES.has(status)} THEN COALESCE(metadata, '{}'::jsonb) - 'pix' ELSE metadata END,
       updated_at = NOW() WHERE id = ${transaction.id}`);
-    if (transaction.module === "wallet_topup" && status === "approved") await creditWallet({ customerId: Number(transaction.customer_id), amountCents: Number(transaction.gross_amount_cents), transactionId: Number(transaction.id), idempotencyKey: `mp-topup:${transaction.id}:${providerPaymentId}`, description: "Recarga Mercado Pago" });
     if ((transaction.module === "motorista" || transaction.module === "entrega") && status === "approved") {
       await settleServiceEarning(transaction.module, String(transaction.reference_id), Number(transaction.id));
     }

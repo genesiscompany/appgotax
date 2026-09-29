@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, useColorScheme, ActivityIndicator, TextInput, Alert } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, useColorScheme, ActivityIndicator, TextInput, Alert, Image } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
-import * as Linking from "expo-linking";
+import * as Clipboard from "expo-clipboard";
 import Colors from "@/constants/colors";
 import { useCustomerAuth } from "@/context/CustomerAuthContext";
-import { getWallet, getWalletLedger, isPaymentUnauthorized, topupWallet, type WalletData, type WalletLedgerItem } from "@/api/payments";
+import { getWallet, getWalletLedger, getPendingWalletTopup, getWalletTopupStatus, isPaymentUnauthorized, topupWallet, type WalletData, type WalletLedgerItem, type WalletPixTopup } from "@/api/payments";
 import ClienteBottomNav from "@/components/ClienteBottomNav";
 import { LinearGradient } from "expo-linear-gradient";
 
@@ -27,6 +27,7 @@ export default function CarteiraScreen() {
   const [loading, setLoading] = useState(true);
   const [topupAmount, setTopupAmount] = useState("");
   const [isToppingUp, setIsToppingUp] = useState(false);
+  const [pendingPix, setPendingPix] = useState<WalletPixTopup | null>(null);
 
   const encerrarSessaoExpirada = async () => {
     await logout();
@@ -44,12 +45,14 @@ export default function CarteiraScreen() {
     }
     setLoading(true);
     try {
-      const [w, l] = await Promise.all([
+      const [w, l, pending] = await Promise.all([
         getWallet(customer.token),
-        getWalletLedger(customer.token)
+        getWalletLedger(customer.token),
+        getPendingWalletTopup(customer.token),
       ]);
       setWallet(w);
       setLedger(l);
+      setPendingPix(pending);
     } catch (e) {
       if (isPaymentUnauthorized(e)) await encerrarSessaoExpirada();
     } finally {
@@ -59,8 +62,31 @@ export default function CarteiraScreen() {
 
   useEffect(() => {
     if (isLoggedIn) loadData();
-    else setLoading(false);
+    else { setPendingPix(null); setLoading(false); }
   }, [isLoggedIn, customer?.token]);
+
+  useEffect(() => {
+    if (!customer?.token || !pendingPix) return;
+    let active = true;
+    const check = async () => {
+      try {
+        const status = await getWalletTopupStatus(customer.token, pendingPix.transactionId);
+        if (!active) return;
+        if (status === "approved") {
+          setPendingPix(null);
+          const [w, l] = await Promise.all([getWallet(customer.token), getWalletLedger(customer.token)]);
+          if (active) { setWallet(w); setLedger(l); Alert.alert("Pix confirmado", "Sua recarga foi adicionada à Carteira."); }
+        } else if (["rejected", "cancelled", "refunded"].includes(status)) {
+          setPendingPix(null);
+          Alert.alert("Pix não concluído", "A recarga não foi creditada. Gere um novo Pix se desejar.");
+        }
+      } catch {
+        // Keep the Pix visible; a temporary connectivity failure must not hide the code.
+      }
+    };
+    const interval = setInterval(() => { void check(); }, 5000);
+    return () => { active = false; clearInterval(interval); };
+  }, [customer?.token, pendingPix?.transactionId]);
 
   const handleTopup = async () => {
     if (!customer?.token) return;
@@ -73,14 +99,8 @@ export default function CarteiraScreen() {
     setIsToppingUp(true);
     try {
       const res = await topupWallet(customer.token, amountCents);
-      if (res.sandbox && res.sandboxInitPoint) {
-        Linking.openURL(res.sandboxInitPoint);
-      } else if (res.initPoint) {
-        Linking.openURL(res.initPoint);
-      } else {
-        throw new Error("O Mercado Pago não retornou o link para pagamento.");
-      }
-      // reset field after flow
+      if (!res.pix?.qrCode || !res.transactionId) throw new Error("O Mercado Pago não retornou um código Pix válido.");
+      setPendingPix(res);
       setTopupAmount("");
     } catch (e: any) {
       if (isPaymentUnauthorized(e)) {
@@ -137,7 +157,7 @@ export default function CarteiraScreen() {
         <View style={[styles.topupSection, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Adicionar Saldo</Text>
           <Text style={[styles.sectionSub, { color: colors.textMuted }]}>
-            Recarregue sua carteira com Pix, Boleto ou Cartão
+            Recarregue sua carteira somente com Pix
           </Text>
           
           <View style={styles.topupRow}>
@@ -172,6 +192,27 @@ export default function CarteiraScreen() {
             </Pressable>
           </View>
         </View>
+
+        {pendingPix && (
+          <View style={[styles.topupSection, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Pix aguardando pagamento</Text>
+            <Text style={[styles.sectionSub, { color: colors.textMuted }]}>
+              {formatCents(pendingPix.amountCents)} · Pague pelo aplicativo do seu banco. O saldo entra após a confirmação.
+            </Text>
+            {pendingPix.pix.qrCodeBase64 && (
+              <Image
+                source={{ uri: `data:image/png;base64,${pendingPix.pix.qrCodeBase64}` }}
+                style={{ width: 210, height: 210, alignSelf: "center", marginVertical: 14 }}
+                accessibilityLabel="QR Code Pix para recarga"
+              />
+            )}
+            <Pressable style={[styles.topupBtn, { backgroundColor: BRAND_COLOR, alignSelf: "stretch", marginTop: 12 }]}
+              onPress={async () => { await Clipboard.setStringAsync(pendingPix.pix.qrCode); Alert.alert("Copiado", "Cole o código Pix no aplicativo do seu banco."); }}>
+              <Feather name="copy" size={18} color="#fff" />
+              <Text style={styles.topupBtnText}>Copiar código Pix</Text>
+            </Pressable>
+          </View>
+        )}
 
         <View style={{ marginTop: 24 }}>
           <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 12 }]}>Movimentações</Text>
