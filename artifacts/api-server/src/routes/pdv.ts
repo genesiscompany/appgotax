@@ -1123,6 +1123,47 @@ router.delete("/motoristas/:id", async (req, res) => {
 });
 
 // ── Endpoint to save restaurant location + visibility radius ──────────────────
+// Used by the shared PDV settings page, regardless of which module is active.
+router.post("/config-area/geocode", async (req, res) => {
+  // Google geocoding is billable: unlike legacy PDV routes, require a signed,
+  // unexpired partner session before sending any request to Google.
+  if (!verifyPdvFinancialToken(req)) return res.status(401).json({ error: "unauthorized" });
+
+  const address = typeof req.body?.address === "string" ? req.body.address.trim() : "";
+  if (address.length < 8 || address.length > 300) {
+    return res.status(400).json({ error: "Informe um endereço completo (até 300 caracteres)." });
+  }
+  const key = process.env.GOOGLE_MAPS_SERVER_KEY || process.env.GOOGLE_MAPS_KEY;
+  if (!key) return res.status(503).json({ error: "Google Maps não está configurado no servidor." });
+
+  try {
+    const params = new URLSearchParams({ address, key, region: "br", language: "pt-BR", components: "country:BR" });
+    const response = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) return res.status(502).json({ error: "Google Maps não respondeu. Tente novamente." });
+    const result = await response.json() as {
+      status: string;
+      results?: { formatted_address: string; partial_match?: boolean; geometry?: { location?: { lat: number; lng: number } } }[];
+    };
+    if (result.status === "ZERO_RESULTS") {
+      return res.status(404).json({ error: "Endereço não encontrado. Informe rua, número, cidade e estado." });
+    }
+    if (result.status !== "OK") {
+      return res.status(502).json({ error: "Não foi possível consultar o Google Maps. Verifique a configuração da Geocoding API." });
+    }
+    if (!result.results?.length) return res.status(404).json({ error: "Endereço não encontrado." });
+    const match = result.results[0];
+    const location = match.geometry?.location;
+    if (match.partial_match || !location || !Number.isFinite(location.lat) || !Number.isFinite(location.lng)) {
+      return res.status(422).json({ error: "Endereço incompleto ou ambíguo. Informe rua, número, cidade e estado." });
+    }
+    return res.json({ lat: location.lat, lng: location.lng, address: match.formatted_address });
+  } catch {
+    return res.status(502).json({ error: "Não foi possível consultar o Google Maps. Tente novamente." });
+  }
+});
+
 router.put("/config-area", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Store, MapPin, Truck, CreditCard, Save, CheckCircle2, AlertCircle, Loader2, Globe, Navigation, Zap, Copy, UtensilsCrossed, Wallet } from "lucide-react";
+import { Store, MapPin, Truck, CreditCard, Save, CheckCircle2, AlertCircle, Loader2, Globe, Navigation, Zap, Copy, UtensilsCrossed, Wallet, Ticket, Tag, Lock } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -33,13 +33,33 @@ const DEFAULT_CONFIG: ConfigEntrega = {
 };
 
 const PAYMENT_METHODS = [
-  { key: "pix",      label: "Pix",                  emoji: "⚡", color: "#22C55E" },
-  { key: "dinheiro", label: "Dinheiro",              emoji: "💵", color: "#F59E0B" },
-  { key: "credito",  label: "Cartão de Crédito",     emoji: "💳", color: "#3B82F6" },
-  { key: "debito",   label: "Cartão de Débito",      emoji: "💳", color: "#8B5CF6" },
-  { key: "vr",       label: "Vale Refeição / VR",    emoji: "🎫", color: "#F97316" },
-  { key: "sodexo",   label: "Sodexo / Alelo",        emoji: "🏷️", color: "#EF4444" },
+  { key: "pix",      label: "Pix",                  icon: Zap,        color: "text-green-500" },
+  { key: "dinheiro", label: "Dinheiro",             icon: Wallet,     color: "text-emerald-500" },
+  { key: "credito",  label: "Cartão de Crédito",    icon: CreditCard, color: "text-blue-500" },
+  { key: "debito",   label: "Cartão de Débito",     icon: CreditCard, color: "text-violet-500" },
+  { key: "vr",       label: "Vale Refeição / VR",   icon: Ticket,     color: "text-orange-500" },
+  { key: "sodexo",   label: "Sodexo / Alelo",       icon: Tag,        color: "text-rose-500" },
 ];
+
+function SettingBlock({ title, description, icon: Icon, children }: { title: string, description: string, icon: React.ElementType, children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col md:flex-row gap-6 lg:gap-10 items-start border-b border-border/50 pb-10 pt-4 last:border-0 last:pb-0">
+      <div className="w-full md:w-[320px] shrink-0 md:sticky md:top-24">
+        <h3 className="text-base font-semibold flex items-center gap-2 text-foreground">
+          <Icon className="w-5 h-5 text-primary" /> {title}
+        </h3>
+        <p className="text-sm text-muted-foreground mt-2 leading-relaxed">{description}</p>
+      </div>
+      <div className="flex-1 w-full min-w-0">
+        <Card className="shadow-sm border-border/60 bg-card overflow-hidden">
+          <CardContent className="p-6">
+            {children}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
 
 export default function Configuracoes() {
   const { token, empresa } = useAuth();
@@ -54,6 +74,10 @@ export default function Configuracoes() {
   const [saveError, setSaveError] = useState("");
 
   const [area, setArea] = useState({ lat_loja: "", lng_loja: "", raio_visibilidade_km: 50 });
+  const [areaAddress, setAreaAddress] = useState("");
+  const [geocodingArea, setGeocodingArea] = useState(false);
+  const [areaAddressError, setAreaAddressError] = useState("");
+  const [areaAddressResult, setAreaAddressResult] = useState("");
   const [savingArea, setSavingArea] = useState(false);
   const [savedArea, setSavedArea] = useState(false);
   const [areaSaveError, setAreaSaveError] = useState("");
@@ -200,9 +224,21 @@ export default function Configuracoes() {
           ...dadosRecebimento,
         }),
       });
-      if (r.ok) { setSavedPix(true); setTimeout(() => setSavedPix(false), 3000); }
-      else setPixError("Erro ao salvar. Tente novamente.");
-    } catch { setPixError("Falha de conexão. Tente novamente."); }
+      if (r.ok) {
+        const saved = await r.json().catch(() => ({}));
+        setPixChave(String(saved.chave_pix ?? pixChave));
+        setPixTipo(String(saved.tipo_chave_pix ?? pixTipo));
+        setDadosRecebimento(prev => ({
+          ...prev,
+          numero_conta_mercado_pago: String(saved.numero_conta_mercado_pago ?? prev.numero_conta_mercado_pago),
+        }));
+        setSavedPix(true);
+        setTimeout(() => setSavedPix(false), 3000);
+      } else {
+        const err = await r.json().catch(() => ({}));
+        setPixError(err.message || err.error || `Erro ao salvar (${r.status}).`);
+      }
+    } catch { setPixError("Falha de conexão ao salvar os dados de recebimento."); }
     setSavingPix(false);
   };
 
@@ -228,6 +264,36 @@ export default function Configuracoes() {
       setAreaSaveError(`Falha de conexão: ${err instanceof Error ? err.message : String(err)}`);
     }
     setSavingArea(false);
+  };
+
+  const handleGeocodeArea = async () => {
+    const address = areaAddress.trim();
+    if (address.length < 8) {
+      setAreaAddressError("Informe rua, número, cidade e estado.");
+      return;
+    }
+    setGeocodingArea(true);
+    setAreaAddressError("");
+    setAreaAddressResult("");
+    try {
+      const response = await fetch("/api/pdv/config-area/geocode", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ address }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Não foi possível localizar o endereço.");
+      if (!Number.isFinite(result.lat) || !Number.isFinite(result.lng)) {
+        throw new Error("O Google Maps não retornou coordenadas válidas.");
+      }
+      setArea(a => ({ ...a, lat_loja: String(result.lat), lng_loja: String(result.lng) }));
+      setAreaAddressResult(result.address || address);
+      setSavedArea(false);
+    } catch (err) {
+      setAreaAddressError(err instanceof Error ? err.message : "Não foi possível localizar o endereço.");
+    } finally {
+      setGeocodingArea(false);
+    }
   };
 
   const handleSave = async () => {
@@ -353,409 +419,401 @@ export default function Configuracoes() {
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      className="space-y-6 max-w-5xl mx-auto"
+      className="max-w-6xl mx-auto space-y-2 pb-12"
     >
-      <div>
+      <div className="mb-8 border-b border-border pb-6">
         <h1 className="text-3xl font-bold tracking-tight text-foreground">Configurações</h1>
-        <p className="text-muted-foreground mt-1">Gerencie o perfil da loja, horários e preferências.</p>
+        <p className="text-muted-foreground mt-2">Gerencie o perfil da loja, horários e preferências da sua conta.</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Profile */}
-        <div className="md:col-span-1">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <Store className="w-5 h-5 text-primary" /> Perfil da Loja
-          </h3>
-          <p className="text-sm text-muted-foreground mt-1">Informações públicas exibidas para os clientes.</p>
-        </div>
-        <Card className="md:col-span-2 shadow-sm border-border/50">
-          <CardContent className="p-6 space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Nome da Loja</label>
-                <Input value={perfil.nome} onChange={e => setPerfil(p => ({ ...p, nome: e.target.value }))} placeholder="Nome da loja" className="bg-muted/50" />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Categoria</label>
-                <Input value={perfil.categoria} onChange={e => setPerfil(p => ({ ...p, categoria: e.target.value }))} placeholder="Ex: Pizzaria, Loja de Roupas..." className="bg-muted/50" />
-              </div>
+      <SettingBlock 
+        title="Perfil da Loja" 
+        description="Informações públicas exibidas para os clientes."
+        icon={Store}
+      >
+        <div className="space-y-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Nome da Loja</label>
+              <Input value={perfil.nome} onChange={e => setPerfil(p => ({ ...p, nome: e.target.value }))} placeholder="Nome da loja" className="bg-muted/30" />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Descrição Curta</label>
-              <Input value={perfil.descricao} onChange={e => setPerfil(p => ({ ...p, descricao: e.target.value }))} placeholder="Breve descrição para os clientes" className="bg-muted/50" />
+              <label className="text-sm font-medium">Categoria</label>
+              <Input value={perfil.categoria} onChange={e => setPerfil(p => ({ ...p, categoria: e.target.value }))} placeholder="Ex: Pizzaria, Loja de Roupas..." className="bg-muted/30" />
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Telefone / WhatsApp</label>
-                <Input value={perfil.telefone} onChange={e => setPerfil(p => ({ ...p, telefone: e.target.value }))} placeholder="(11) 99999-9999" className="bg-muted/50" />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">CNPJ</label>
-                <Input value={perfil.cnpj} onChange={e => setPerfil(p => ({ ...p, cnpj: e.target.value }))} placeholder="00.000.000/0001-00" className="bg-muted/50" />
-              </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Descrição Curta</label>
+            <Input value={perfil.descricao} onChange={e => setPerfil(p => ({ ...p, descricao: e.target.value }))} placeholder="Breve descrição para os clientes" className="bg-muted/30" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Telefone / WhatsApp</label>
+              <Input value={perfil.telefone} onChange={e => setPerfil(p => ({ ...p, telefone: e.target.value }))} placeholder="(11) 99999-9999" className="bg-muted/30" />
             </div>
-            {perfilError && (
-              <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 px-3 py-2 rounded-lg">
-                <AlertCircle className="w-4 h-4 shrink-0" /> {perfilError}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">CNPJ</label>
+              <Input value={perfil.cnpj} onChange={e => setPerfil(p => ({ ...p, cnpj: e.target.value }))} placeholder="00.000.000/0001-00" className="bg-muted/30" />
+            </div>
+          </div>
+          {perfilError && (
+            <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 px-3 py-2.5 rounded-lg border border-destructive/20">
+              <AlertCircle className="w-4 h-4 shrink-0" /> {perfilError}
+            </div>
+          )}
+          <div className="flex justify-end pt-2">
+            <Button onClick={handleSavePerfil} disabled={savingPerfil} className="min-w-[140px] bg-primary hover:bg-primary/90 text-primary-foreground shadow-md shadow-primary/20">
+              {savingPerfil ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : savedPerfil ? <CheckCircle2 className="w-4 h-4 mr-2" /> : <Save className="w-4 h-4 mr-2" />}
+              {savingPerfil ? "Salvando..." : savedPerfil ? "Salvo!" : "Salvar Perfil"}
+            </Button>
+          </div>
+        </div>
+      </SettingBlock>
+
+      {isFood && subcategorias.length > 0 && (
+        <SettingBlock 
+          title="Tipo de Estabelecimento" 
+          description="Selecione a subcategoria que melhor descreve o seu negócio. Isso ajuda os clientes a encontrar sua loja no app."
+          icon={UtensilsCrossed}
+        >
+          <div className="space-y-4">
+            <div className="flex flex-wrap gap-2.5">
+              {subcategorias.map(sub => {
+                const sel = subcategoriaId === sub.id;
+                return (
+                  <button
+                    key={sub.id}
+                    onClick={() => handleSaveSubcat(sel ? null : sub.id)}
+                    disabled={savingSubcat}
+                    className={`flex items-center gap-2 px-4 py-2.5 rounded-full border text-sm font-medium transition-all ${
+                      sel
+                        ? "border-primary bg-primary/10 text-primary shadow-sm"
+                        : "border-border bg-muted/20 text-muted-foreground hover:border-primary/40 hover:text-foreground hover:bg-muted/40"
+                    } disabled:opacity-50`}
+                  >
+                    {sub.nome}
+                    {sel && <CheckCircle2 className="w-3.5 h-3.5 ml-1" />}
+                  </button>
+                );
+              })}
+            </div>
+            {savedSubcat && (
+              <div className="flex items-center gap-2 text-primary font-medium text-sm">
+                <CheckCircle2 className="w-4 h-4" /> Subcategoria salva com sucesso!
               </div>
             )}
-            <div className="flex justify-end pt-2">
-              <Button onClick={handleSavePerfil} disabled={savingPerfil} className="min-w-[140px]">
-                {savingPerfil ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : savedPerfil ? <CheckCircle2 className="w-4 h-4 mr-2" /> : <Save className="w-4 h-4 mr-2" />}
-                {savingPerfil ? "Salvando..." : savedPerfil ? "Salvo!" : "Salvar Perfil"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+            {!subcategoriaId && (
+              <p className="text-sm text-muted-foreground">Nenhuma subcategoria selecionada. Seu estabelecimento aparecerá na aba "Todos" do app.</p>
+            )}
+          </div>
+        </SettingBlock>
+      )}
 
-        {/* Subcategoria de Alimentação — só aparece para parceiros food */}
-        {isFood && subcategorias.length > 0 && (
-          <>
-            <div className="md:col-span-1 mt-6">
-              <h3 className="text-lg font-semibold flex items-center gap-2">
-                <UtensilsCrossed className="w-5 h-5 text-primary" /> Tipo de Estabelecimento
-              </h3>
-              <p className="text-sm text-muted-foreground mt-1">Selecione a subcategoria que melhor descreve o seu negócio. Isso ajuda os clientes a encontrar sua loja no app.</p>
+      <SettingBlock
+        title={isPassagens ? "Calcular por km" : "Taxa de Entrega"}
+        description={isPassagens ? "Configure o cálculo de tarifa por distância percorrida nas viagens." : "Configure como a taxa de delivery é calculada para os pedidos."}
+        icon={Truck}
+      >
+        <div className="space-y-6">
+          {loading ? (
+            <div className="flex items-center gap-2 text-muted-foreground py-4">
+              <Loader2 className="w-4 h-4 animate-spin" /> Carregando configurações...
             </div>
-            <Card className="md:col-span-2 shadow-sm border-border/50 mt-0 md:mt-6">
-              <CardContent className="p-6 space-y-4">
-                <div className="flex flex-wrap gap-2">
-                  {subcategorias.map(sub => {
-                    const sel = subcategoriaId === sub.id;
-                    return (
-                      <button
-                        key={sub.id}
-                        onClick={() => handleSaveSubcat(sel ? null : sub.id)}
-                        disabled={savingSubcat}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-xl border-2 text-sm font-medium transition-all ${
-                          sel
-                            ? "border-primary bg-primary/10 text-primary"
-                            : "border-border bg-muted/30 text-foreground hover:border-primary/40"
-                        } disabled:opacity-50`}
-                      >
-                        {sub.emoji && <span className="text-base">{sub.emoji}</span>}
-                        {sub.nome}
-                        {sel && <CheckCircle2 className="w-3.5 h-3.5 ml-1" />}
-                      </button>
-                    );
-                  })}
+          ) : (
+            <>
+              <div className="flex items-center justify-between p-4 bg-muted/30 rounded-xl border border-border/50">
+                <div>
+                  <p className="font-medium text-foreground">{isPassagens ? "Calcular tarifa por km" : "Cobrar taxa de entrega"}</p>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    {isPassagens ? "Ative para calcular o valor da viagem por distância percorrida." : "Ative para aplicar taxa nos pedidos delivery."}
+                  </p>
                 </div>
-                {savedSubcat && (
-                  <div className="flex items-center gap-2 text-green-400 text-sm">
-                    <CheckCircle2 className="w-4 h-4" /> Subcategoria salva com sucesso!
-                  </div>
-                )}
-                {!subcategoriaId && (
-                  <p className="text-xs text-muted-foreground">Nenhuma subcategoria selecionada. Seu estabelecimento aparecerá na aba "Todos" do app.</p>
-                )}
-              </CardContent>
-            </Card>
-          </>
-        )}
-
-        {/* Delivery fees / km calc */}
-        <div className="md:col-span-1 mt-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <Truck className="w-5 h-5 text-primary" /> {isPassagens ? "Calcular por km" : "Taxa de Entrega"}
-          </h3>
-          <p className="text-sm text-muted-foreground mt-1">
-            {isPassagens
-              ? "Configure o cálculo de tarifa por distância percorrida nas viagens."
-              : "Configure como a taxa de delivery é calculada para os pedidos."}
-          </p>
-        </div>
-        <Card className="md:col-span-2 shadow-sm border-border/50 mt-0 md:mt-6">
-          <CardContent className="p-6 space-y-5">
-            {loading ? (
-              <div className="flex items-center gap-2 text-muted-foreground py-4">
-                <Loader2 className="w-4 h-4 animate-spin" /> Carregando configurações...
+                <Switch checked={cfg.ativo} onCheckedChange={v => set("ativo", v)} />
               </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between p-4 bg-muted/30 rounded-xl border border-border/50">
-                  <div>
-                    <p className="font-medium">{isPassagens ? "Calcular tarifa por km" : "Cobrar taxa de entrega"}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {isPassagens ? "Ative para calcular o valor da viagem por distância percorrida." : "Ative para aplicar taxa nos pedidos delivery."}
-                    </p>
-                  </div>
-                  <Switch checked={cfg.ativo} onCheckedChange={v => set("ativo", v)} />
-                </div>
 
-                {cfg.ativo && (
-                  <>
-                    <div>
-                      <p className="text-sm font-semibold text-foreground mb-2">Tipo de cobrança</p>
-                      <div className="grid grid-cols-2 gap-3">
-                        {(["fixa", "km"] as const).map(t => (
-                          <button
-                            key={t}
-                            onClick={() => set("tipo", t)}
-                            className={`flex flex-col items-start p-4 rounded-xl border-2 transition-all text-left ${
-                              cfg.tipo === t
-                                ? "border-primary bg-primary/5"
-                                : "border-border hover:border-primary/30 bg-muted/20"
-                            }`}
-                          >
-                            <span className="font-semibold text-sm text-foreground">
+              {cfg.ativo && (
+                <div className="space-y-6">
+                  <div>
+                    <p className="text-sm font-medium text-foreground mb-3">Tipo de cobrança</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {(["fixa", "km"] as const).map(t => (
+                        <button
+                          key={t}
+                          onClick={() => set("tipo", t)}
+                          className={`flex flex-col items-start p-4 rounded-xl border-2 transition-all text-left ${
+                            cfg.tipo === t
+                              ? "border-primary bg-primary/5 shadow-sm"
+                              : "border-border hover:border-primary/30 bg-muted/10"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full">
+                            <span className={`font-semibold text-sm ${cfg.tipo === t ? "text-primary" : "text-foreground"}`}>
                               {t === "fixa" ? "Taxa Fixa" : "Por Quilômetro"}
                             </span>
-                            <span className="text-xs text-muted-foreground mt-0.5">
-                              {t === "fixa"
-                                ? "Valor único para qualquer distância"
-                                : "Calculado via Google Maps por km percorrido"}
-                            </span>
                             {cfg.tipo === t && (
-                              <span className="mt-2 text-[10px] bg-primary/15 text-primary px-2 py-0.5 rounded-full font-semibold">Ativo</span>
+                              <CheckCircle2 className="w-4 h-4 text-primary" />
                             )}
-                          </button>
-                        ))}
+                          </div>
+                          <span className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
+                            {t === "fixa"
+                              ? "Valor único para qualquer distância. Simples e direto."
+                              : "Calculado via Google Maps de acordo com a distância."}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {cfg.tipo === "fixa" && (
+                    <div className="space-y-4 bg-muted/20 p-5 rounded-xl border border-border/50">
+                      <div className="space-y-2 max-w-sm">
+                        <label className="text-sm font-medium text-foreground">Valor da taxa fixa (R$)</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">R$</span>
+                          <Input
+                            type="number" min="0" step="0.50"
+                            value={cfg.taxa_fixa}
+                            onChange={e => set("taxa_fixa", Number(e.target.value))}
+                            className="pl-10 bg-background"
+                          />
+                        </div>
+                      </div>
+                      <div className="bg-primary/10 border border-primary/20 rounded-lg p-3.5 text-sm">
+                        <span className="text-primary/80 font-medium">Exemplo: </span>
+                        <span className="font-semibold text-primary">Todo delivery cobrará R$ {cfg.taxa_fixa.toFixed(2)} fixo.</span>
                       </div>
                     </div>
+                  )}
 
-                    {cfg.tipo === "fixa" && (
-                      <div className="space-y-3">
-                        <div className="space-y-1.5">
-                          <label className="text-sm font-medium">Valor da taxa fixa (R$)</label>
-                          <div className="relative">
-                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">R$</span>
-                            <Input
-                              type="number" min="0" step="0.50"
-                              value={cfg.taxa_fixa}
-                              onChange={e => set("taxa_fixa", Number(e.target.value))}
-                              className="pl-9 bg-muted/50"
-                            />
-                          </div>
-                        </div>
-                        <div className="bg-blue-500/5 border border-blue-500/15 rounded-lg p-3 text-sm">
-                          <span className="text-muted-foreground">Exemplo: </span>
-                          <span className="font-semibold text-foreground">Todo delivery cobrará R$ {cfg.taxa_fixa.toFixed(2)} fixo.</span>
-                        </div>
+                  {cfg.tipo === "km" && (
+                    <div className="space-y-5 bg-muted/20 p-5 rounded-xl border border-border/50">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                          <MapPin className="w-4 h-4 text-primary" />
+                          {isPassagens ? "Endereço de partida (garagem / terminal)" : "Endereço do restaurante (origem)"}
+                        </label>
+                        <AddressAutocomplete
+                          value={cfg.endereco_restaurante}
+                          onChange={v => set("endereco_restaurante", v)}
+                          placeholder={isPassagens ? "Ex: Terminal Rodoviário de São Paulo" : "Ex: Rua das Flores, 100, São Paulo, SP"}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          {isPassagens ? "Endereço de origem para calcular a distância até o destino." : "Este endereço é usado como ponto de partida para calcular a distância."}
+                        </p>
                       </div>
-                    )}
 
-                    {cfg.tipo === "km" && (
-                      <div className="space-y-4">
-                        <div className="space-y-1.5">
-                          <label className="text-sm font-medium flex items-center gap-1.5">
-                            <MapPin className="w-3.5 h-3.5 text-primary" />
-                            {isPassagens ? "Endereço de partida (garagem / terminal)" : "Endereço do restaurante (origem)"}
-                          </label>
-                          <AddressAutocomplete
-                            value={cfg.endereco_restaurante}
-                            onChange={v => set("endereco_restaurante", v)}
-                            placeholder={isPassagens ? "Ex: Terminal Rodoviário de São Paulo" : "Ex: Rua das Flores, 100, São Paulo, SP"}
-                          />
-                          <p className="text-xs text-muted-foreground">
-                            {isPassagens ? "Endereço de origem para calcular a distância até o destino." : "Este endereço é usado como ponto de partida para calcular a distância."}
-                          </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-foreground">Taxa por km (R$)</label>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">R$</span>
+                            <Input type="number" min="0" step="0.50" value={cfg.taxa_por_km}
+                              onChange={e => set("taxa_por_km", Number(e.target.value))}
+                              className="pl-10 bg-background" />
+                          </div>
                         </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="space-y-1.5">
-                            <label className="text-sm font-medium">Taxa por km (R$)</label>
-                            <div className="relative">
-                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">R$</span>
-                              <Input type="number" min="0" step="0.50" value={cfg.taxa_por_km}
-                                onChange={e => set("taxa_por_km", Number(e.target.value))}
-                                className="pl-9 bg-muted/50" />
-                            </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-foreground">Taxa mínima (R$)</label>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">R$</span>
+                            <Input type="number" min="0" step="0.50" value={cfg.taxa_minima}
+                              onChange={e => set("taxa_minima", Number(e.target.value))}
+                              className="pl-10 bg-background" />
                           </div>
-                          <div className="space-y-1.5">
-                            <label className="text-sm font-medium">Taxa mínima (R$)</label>
-                            <div className="relative">
-                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">R$</span>
-                              <Input type="number" min="0" step="0.50" value={cfg.taxa_minima}
-                                onChange={e => set("taxa_minima", Number(e.target.value))}
-                                className="pl-9 bg-muted/50" />
-                            </div>
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-sm font-medium">KM grátis (primeiros km)</label>
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-foreground">KM grátis</label>
+                          <div className="relative">
                             <Input type="number" min="0" step="0.5" value={cfg.km_minimo}
                               onChange={e => set("km_minimo", Number(e.target.value))}
-                              className="bg-muted/50" placeholder="0" />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-sm font-medium">Raio máximo (km)</label>
-                            <Input type="number" min="1" step="1" value={cfg.raio_max_km}
-                              onChange={e => set("raio_max_km", Number(e.target.value))}
-                              className="bg-muted/50" />
+                              className="pr-10 bg-background" placeholder="0" />
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">km</span>
                           </div>
                         </div>
-
-                        <div className="bg-blue-500/5 border border-blue-500/15 rounded-xl p-4 space-y-2">
-                          <p className="text-xs font-semibold text-blue-600 dark:text-blue-400 uppercase tracking-wider">Prévia — exemplo {exampleKm} km</p>
-                          <div className="space-y-1 text-sm">
-                            <div className="flex justify-between text-muted-foreground">
-                              <span>Distância percorrida</span><span>{exampleKm} km</span>
-                            </div>
-                            {cfg.km_minimo > 0 && (
-                              <div className="flex justify-between text-muted-foreground">
-                                <span>Grátis até {cfg.km_minimo} km</span><span>- {cfg.km_minimo} km</span>
-                              </div>
-                            )}
-                            <div className="flex justify-between text-muted-foreground">
-                              <span>KM cobrado × R$ {cfg.taxa_por_km.toFixed(2)}</span>
-                              <span>{kmCobrado.toFixed(1)} km</span>
-                            </div>
-                            <div className="flex justify-between font-bold text-foreground border-t border-blue-500/15 pt-2 mt-1">
-                              <span>Taxa de entrega</span>
-                              <span className="text-primary">R$ {taxaExemplo.toFixed(2)}</span>
-                            </div>
-                            {cfg.raio_max_km > 0 && (
-                              <p className="text-xs text-muted-foreground">Máximo: {cfg.raio_max_km} km de distância</p>
-                            )}
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium text-foreground">Raio máximo</label>
+                          <div className="relative">
+                            <Input type="number" min="1" step="1" value={cfg.raio_max_km}
+                              onChange={e => set("raio_max_km", Number(e.target.value))}
+                              className="pr-10 bg-background" />
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">km</span>
                           </div>
                         </div>
                       </div>
-                    )}
-                  </>
-                )}
-              </>
-            )}
 
-            {!loading && (
-              <>
-                {saveError && (
-                  <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive">
-                    <AlertCircle className="w-4 h-4 shrink-0" />{saveError}
-                  </div>
-                )}
-                <Button onClick={handleSave} disabled={saving} className="w-full bg-primary hover:bg-primary/90 shadow-md shadow-primary/20">
+                      <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-4 space-y-3">
+                        <p className="text-xs font-bold text-blue-600 dark:text-blue-400 uppercase tracking-wider">Simulação — exemplo {exampleKm} km</p>
+                        <div className="space-y-1.5 text-sm text-blue-900/80 dark:text-blue-100/80">
+                          <div className="flex justify-between">
+                            <span>Distância percorrida</span><span>{exampleKm} km</span>
+                          </div>
+                          {cfg.km_minimo > 0 && (
+                            <div className="flex justify-between">
+                              <span>Grátis até {cfg.km_minimo} km</span><span>- {cfg.km_minimo} km</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between">
+                            <span>KM cobrado × R$ {cfg.taxa_por_km.toFixed(2)}</span>
+                            <span>{kmCobrado.toFixed(1)} km</span>
+                          </div>
+                          <div className="flex justify-between font-semibold text-blue-900 dark:text-blue-100 border-t border-blue-500/20 pt-2 mt-2">
+                            <span>Valor calculado</span>
+                            <span>R$ {taxaExemplo.toFixed(2)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {!loading && (
+            <div className="pt-2">
+              {saveError && (
+                <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive mb-4">
+                  <AlertCircle className="w-4 h-4 shrink-0" />{saveError}
+                </div>
+              )}
+              <div className="flex justify-end">
+                <Button onClick={handleSave} disabled={saving} className="min-w-[160px] bg-primary hover:bg-primary/90 shadow-md shadow-primary/20">
                   {saving
                     ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Salvando...</>
                     : saved
-                    ? <><CheckCircle2 className="w-4 h-4 mr-2 text-green-400" />Salvo!</>
-                    : <><Save className="w-4 h-4 mr-2" />{isPassagens ? "Salvar configuração de km" : "Salvar configurações de entrega"}</>
+                    ? <><CheckCircle2 className="w-4 h-4 mr-2 text-primary-foreground" />Salvo!</>
+                    : <><Save className="w-4 h-4 mr-2" />{isPassagens ? "Salvar Km" : "Salvar Taxas"}</>
                   }
                 </Button>
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-
-        {/* Area limit */}
-        <div className="md:col-span-1 mt-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <Globe className="w-5 h-5 text-primary" /> Área de Visibilidade
-          </h3>
-          <p className="text-sm text-muted-foreground mt-1">
-            Defina a localização da loja e o raio máximo no qual ela aparece para clientes no app.
-          </p>
+              </div>
+            </div>
+          )}
         </div>
-        <Card className="md:col-span-2 shadow-sm border-border/50 mt-0 md:mt-6">
-          <CardContent className="p-6 space-y-5">
-            <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-xl text-sm text-blue-700 dark:text-blue-300 flex items-start gap-2">
-              <Navigation className="w-4 h-4 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <span>Informe a latitude e longitude da sua loja para que o app calcule a distância até o cliente e mostre apenas restaurantes próximos.</span>
-                <div>
-                  <span>Não sabe sua localização? </span>
-                  <a
-                    href="https://www.latlong.net/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-semibold underline underline-offset-2 hover:opacity-80 transition-opacity"
-                  >
-                    Clique aqui para descobrir no mapa →
-                  </a>
-                </div>
-              </div>
-            </div>
+      </SettingBlock>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-muted-foreground" /> Latitude da Loja
-                </label>
-                <Input
-                  type="number" step="0.000001" placeholder="Ex: -23.5505"
-                  value={area.lat_loja}
-                  onChange={e => setArea(a => ({ ...a, lat_loja: e.target.value }))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-muted-foreground" /> Longitude da Loja
-                </label>
-                <Input
-                  type="number" step="0.000001" placeholder="Ex: -46.6333"
-                  value={area.lng_loja}
-                  onChange={e => setArea(a => ({ ...a, lng_loja: e.target.value }))}
-                />
-              </div>
+      <SettingBlock
+        title="Área de Visibilidade"
+        description="Defina a localização da loja e o raio máximo no qual ela aparece para clientes no app."
+        icon={Globe}
+      >
+        <div className="space-y-6">
+          <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl text-sm text-primary/80 dark:text-primary-foreground flex items-start gap-3">
+            <Navigation className="w-5 h-5 shrink-0 mt-0.5 text-primary" />
+            <div className="space-y-1.5 leading-relaxed">
+              <p>Busque o endereço da loja pelo Google Maps para preencher latitude e longitude. Confira o resultado antes de salvar a área.</p>
             </div>
+          </div>
 
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium flex items-center gap-1.5">
-                <Globe className="w-3.5 h-3.5 text-muted-foreground" /> Raio de Visibilidade (km)
+          <div className="space-y-2">
+            <label htmlFor="area-address" className="text-sm font-medium text-foreground">Endereço da loja</label>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input
+                id="area-address"
+                value={areaAddress}
+                onChange={e => { setAreaAddress(e.target.value); setAreaAddressResult(""); setAreaAddressError(""); }}
+                onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); if (!geocodingArea) void handleGeocodeArea(); } }}
+                placeholder="Rua, número, bairro, cidade e estado"
+                className="bg-muted/30"
+                maxLength={300}
+              />
+              <Button type="button" variant="outline" onClick={handleGeocodeArea} disabled={geocodingArea || loading} className="shrink-0">
+                {geocodingArea ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <MapPin className="w-4 h-4 mr-2" />}
+                {geocodingArea ? "Localizando..." : "Gerar coordenadas"}
+              </Button>
+            </div>
+            {areaAddressError && <p role="alert" className="text-sm text-destructive">{areaAddressError}</p>}
+            {areaAddressResult && <p className="text-sm text-muted-foreground">Local encontrado: {areaAddressResult}. Confira as coordenadas abaixo e clique em Salvar Área.</p>}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                <MapPin className="w-4 h-4 text-muted-foreground" /> Latitude da Loja
               </label>
+              <Input
+                type="number" step="0.000001" placeholder="Ex: -23.5505"
+                value={area.lat_loja}
+                onChange={e => setArea(a => ({ ...a, lat_loja: e.target.value }))}
+                className="bg-muted/30"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground flex items-center gap-1.5">
+                <MapPin className="w-4 h-4 text-muted-foreground" /> Longitude da Loja
+              </label>
+              <Input
+                type="number" step="0.000001" placeholder="Ex: -46.6333"
+                value={area.lng_loja}
+                onChange={e => setArea(a => ({ ...a, lng_loja: e.target.value }))}
+                className="bg-muted/30"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2 max-w-sm">
+            <label className="text-sm font-medium text-foreground flex items-center gap-1.5">
+              <Globe className="w-4 h-4 text-muted-foreground" /> Raio de Visibilidade
+            </label>
+            <div className="relative">
               <Input
                 type="number" min="1" max="500" step="1"
                 value={area.raio_visibilidade_km}
                 onChange={e => setArea(a => ({ ...a, raio_visibilidade_km: Number(e.target.value) }))}
+                className="bg-muted/30 pr-10"
               />
-              <p className="text-xs text-muted-foreground">
-                Clientes a mais de <strong>{area.raio_visibilidade_km} km</strong> não verão sua loja no app.
-                Deixe um valor alto (ex: 500) para exibir para todos.
-              </p>
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">km</span>
             </div>
+            <p className="text-xs text-muted-foreground pt-1 leading-relaxed">
+              Clientes a mais de <strong>{area.raio_visibilidade_km} km</strong> não verão sua loja no app. Deixe 500 para exibir para todos.
+            </p>
+          </div>
 
+          <div className="pt-2 flex justify-end">
             {areaSaveError && (
-              <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive">
+              <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive mr-4">
                 <AlertCircle className="w-4 h-4 shrink-0" />{areaSaveError}
               </div>
             )}
-
-            <Button onClick={handleSaveArea} disabled={savingArea} className="bg-primary hover:bg-primary/90">
+            <Button onClick={handleSaveArea} disabled={savingArea} className="min-w-[160px] bg-primary hover:bg-primary/90 shadow-md shadow-primary/20">
               {savingArea
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Salvando...</>
                 : savedArea
-                ? <><CheckCircle2 className="w-4 h-4 mr-2 text-green-400" />Área salva!</>
+                ? <><CheckCircle2 className="w-4 h-4 mr-2 text-primary-foreground" />Área salva!</>
                 : <><Save className="w-4 h-4 mr-2" />Salvar Área</>
               }
             </Button>
-          </CardContent>
-        </Card>
-
-        {/* ── Payment methods ─────────────────────────────────────────────── */}
-        <div className="md:col-span-1 mt-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <CreditCard className="w-5 h-5 text-primary" /> Formas de Pagamento
-          </h3>
-          <p className="text-sm text-muted-foreground mt-1">
-            Métodos aceitos na entrega ou no balcão. Os métodos ativos aparecerão para o cliente escolher no app.
-          </p>
+          </div>
         </div>
-        <Card className="md:col-span-2 shadow-sm border-border/50 mt-0 md:mt-6">
-          <CardContent className="p-6 space-y-5">
-            {loadingPag ? (
-              <div className="flex items-center gap-2 text-muted-foreground py-4">
-                <Loader2 className="w-4 h-4 animate-spin" /> Carregando formas de pagamento...
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {PAYMENT_METHODS.map(method => {
-                    const enabled = metodosPag.includes(method.key);
-                    return (
-                      <div
-                        key={method.key}
-                        onClick={() => toggleMetodo(method.key)}
-                        className={`flex items-center gap-3 p-3.5 border-2 rounded-xl cursor-pointer transition-all ${
-                          enabled
-                            ? "border-primary/40 bg-primary/5"
-                            : "border-border/50 hover:border-border bg-card"
-                        }`}
-                      >
-                        <span className="text-2xl">{method.emoji}</span>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-foreground">{method.label}</p>
-                          {enabled && (
-                            <p className="text-[11px] text-primary font-semibold">Habilitado</p>
-                          )}
+      </SettingBlock>
+
+      <SettingBlock
+        title="Formas de Pagamento"
+        description="Métodos aceitos na entrega ou no balcão. Aparecerão para o cliente no momento do checkout."
+        icon={CreditCard}
+      >
+        <div className="space-y-6">
+          {loadingPag ? (
+            <div className="flex items-center gap-2 text-muted-foreground py-4">
+              <Loader2 className="w-4 h-4 animate-spin" /> Carregando formas de pagamento...
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {PAYMENT_METHODS.map(method => {
+                  const enabled = metodosPag.includes(method.key);
+                  return (
+                    <div
+                      key={method.key}
+                      onClick={() => toggleMetodo(method.key)}
+                      className={`flex flex-col gap-3 p-4 border rounded-xl cursor-pointer transition-all ${
+                        enabled
+                          ? "border-primary bg-primary/5 shadow-sm"
+                          : "border-border hover:border-border/80 bg-background"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className={`p-2 rounded-lg ${enabled ? "bg-background" : "bg-muted"}`}>
+                          <method.icon className={`w-5 h-5 ${method.color}`} />
                         </div>
                         <Switch
                           checked={enabled}
@@ -763,300 +821,296 @@ export default function Configuracoes() {
                           onClick={e => e.stopPropagation()}
                         />
                       </div>
-                    );
-                  })}
-                </div>
+                      <div>
+                        <p className="text-sm font-semibold text-foreground">{method.label}</p>
+                        <p className={`text-xs mt-0.5 ${enabled ? "text-primary font-medium" : "text-muted-foreground"}`}>
+                          {enabled ? "Ativo" : "Desativado"}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
 
-                <div className="text-xs text-muted-foreground bg-muted/30 rounded-lg px-4 py-3">
-                  <strong>{metodosPag.length}</strong> {metodosPag.length === 1 ? "forma habilitada" : "formas habilitadas"}.
-                  {metodosPag.length === 0 && " Habilite ao menos uma forma de pagamento."}
-                </div>
-
-                {pagError && (
-                  <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive">
-                    <AlertCircle className="w-4 h-4 shrink-0" />{pagError}
-                  </div>
-                )}
-
-                <Button
-                  onClick={handleSavePag}
-                  disabled={savingPag || metodosPag.length === 0}
-                  className="w-full bg-primary hover:bg-primary/90 shadow-md shadow-primary/20"
-                >
-                  {savingPag
-                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Salvando...</>
-                    : savedPag
-                    ? <><CheckCircle2 className="w-4 h-4 mr-2 text-green-400" />Formas de pagamento salvas!</>
-                    : <><Save className="w-4 h-4 mr-2" />Salvar formas de pagamento</>
-                  }
-                </Button>
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* PIX Direto */}
-        <div className="md:col-span-1 mt-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <Zap className="w-5 h-5 text-green-500" /> PIX Direto ao Parceiro
-          </h3>
-          <p className="text-sm text-muted-foreground mt-1">
-            Configure sua chave PIX para que os clientes possam pagar diretamente para você pelo app.
-          </p>
-        </div>
-        <Card className="md:col-span-2 shadow-sm border-border/50 mt-0 md:mt-6">
-          <CardContent className="p-6 space-y-5">
-            <div className="flex items-start gap-3 p-4 bg-green-500/10 border border-green-500/20 rounded-xl">
-              <Zap className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
-              <div className="text-sm">
-                <p className="font-semibold text-foreground">Como funciona?</p>
-                <p className="text-muted-foreground mt-0.5">
-                  Quando configurado, o app do cliente exibe o botão <strong>"PIX Direto"</strong> ao fazer um pedido. O cliente copia a chave e transfere diretamente para você — sem intermediários.
+              <div className="pt-2 flex flex-col sm:flex-row justify-between items-center gap-4 border-t border-border/50 pt-6 mt-6">
+                <p className="text-sm text-muted-foreground">
+                  <strong className="text-foreground">{metodosPag.length}</strong> {metodosPag.length === 1 ? "forma habilitada" : "formas habilitadas"}.
                 </p>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Tipo da chave</label>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { val: "cpf", label: "CPF" },
-                  { val: "cnpj", label: "CNPJ" },
-                  { val: "email", label: "E-mail" },
-                  { val: "telefone", label: "Telefone" },
-                  { val: "aleatoria", label: "Aleatória" },
-                ].map(t => (
-                  <button
-                    key={t.val}
-                    onClick={() => setPixTipo(t.val)}
-                    className={`px-3 py-2 rounded-lg border-2 text-sm font-medium transition-all ${
-                      pixTipo === t.val
-                        ? "border-green-500 bg-green-500/10 text-green-600"
-                        : "border-border bg-muted/30 text-muted-foreground hover:border-border/80"
-                    }`}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Chave PIX</label>
-              <div className="flex gap-2">
-                <Input
-                  value={pixChave}
-                  onChange={e => setPixChave(e.target.value)}
-                  placeholder={
-                    pixTipo === "cpf" ? "000.000.000-00" :
-                    pixTipo === "cnpj" ? "00.000.000/0001-00" :
-                    pixTipo === "email" ? "seu@email.com" :
-                    pixTipo === "telefone" ? "+55 11 99999-9999" :
-                    "Cole aqui a chave aleatória"
-                  }
-                  className="flex-1"
-                />
-                {pixChave && (
+                <div className="flex items-center gap-4">
+                  {pagError && (
+                    <span className="text-sm text-destructive flex items-center gap-1">
+                      <AlertCircle className="w-4 h-4" />{pagError}
+                    </span>
+                  )}
                   <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() => { navigator.clipboard.writeText(pixChave); setPixCopiado(true); setTimeout(() => setPixCopiado(false), 2000); }}
-                    title="Copiar chave"
+                    onClick={handleSavePag}
+                    disabled={savingPag || metodosPag.length === 0}
+                    className="min-w-[160px] bg-primary hover:bg-primary/90 shadow-md shadow-primary/20"
                   >
-                    {pixCopiado ? <CheckCircle2 className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                    {savingPag
+                      ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Salvando...</>
+                      : savedPag
+                      ? <><CheckCircle2 className="w-4 h-4 mr-2 text-primary-foreground" />Salvo!</>
+                      : <><Save className="w-4 h-4 mr-2" />Salvar Pagamentos</>
+                    }
                   </Button>
-                )}
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Esta chave ficará visível para os clientes no app ao realizar pedidos.
+            </>
+          )}
+        </div>
+      </SettingBlock>
+
+      <SettingBlock
+        title="PIX Direto ao Parceiro"
+        description="Configure sua chave PIX para que os clientes transfiram diretamente para sua conta."
+        icon={Zap}
+      >
+        <div className="space-y-6">
+          <div className="flex items-start gap-3 p-4 bg-green-500/10 border border-green-500/20 rounded-xl text-green-900 dark:text-green-100">
+            <Zap className="w-5 h-5 text-green-600 dark:text-green-400 shrink-0 mt-0.5" />
+            <div className="text-sm leading-relaxed">
+              <p className="font-semibold mb-0.5 text-green-800 dark:text-green-300">Como funciona?</p>
+              <p className="opacity-90">
+                O app exibirá o botão <strong>"PIX Direto"</strong> no checkout. O cliente transfere diretamente para você, e a taxa de serviço da GoTaxi é contabilizada separadamente.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <label className="text-sm font-medium text-foreground">Tipo de Chave PIX</label>
+            <div className="flex flex-wrap gap-2.5">
+              {[
+                { val: "cpf", label: "CPF" },
+                { val: "cnpj", label: "CNPJ" },
+                { val: "email", label: "E-mail" },
+                { val: "telefone", label: "Telefone" },
+                { val: "aleatoria", label: "Aleatória" },
+              ].map(t => (
+                <button
+                  key={t.val}
+                  onClick={() => setPixTipo(t.val)}
+                  className={`px-4 py-2 rounded-full border text-sm font-medium transition-all ${
+                    pixTipo === t.val
+                      ? "border-green-500 bg-green-500/10 text-green-700 dark:text-green-400 shadow-sm"
+                      : "border-border bg-muted/20 text-muted-foreground hover:border-green-500/30 hover:bg-green-500/5 hover:text-foreground"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-foreground">Sua Chave PIX</label>
+            <div className="flex gap-2 max-w-lg">
+              <Input
+                value={pixChave}
+                onChange={e => setPixChave(e.target.value)}
+                placeholder={
+                  pixTipo === "cpf" ? "000.000.000-00" :
+                  pixTipo === "cnpj" ? "00.000.000/0001-00" :
+                  pixTipo === "email" ? "seu@email.com" :
+                  pixTipo === "telefone" ? "+55 11 99999-9999" :
+                  "Cole aqui a chave aleatória"
+                }
+                className="flex-1 bg-muted/30 font-mono"
+              />
+              {pixChave && (
+                <Button
+                  variant="outline"
+                  className="shrink-0 w-10 p-0 border-border"
+                  onClick={() => { navigator.clipboard.writeText(pixChave); setPixCopiado(true); setTimeout(() => setPixCopiado(false), 2000); }}
+                  title="Copiar chave"
+                >
+                  {pixCopiado ? <CheckCircle2 className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4 text-muted-foreground" />}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-border pt-6 mt-6 space-y-4">
+            <div>
+               <p className="text-sm font-semibold text-foreground">Conta Mercado Pago do parceiro</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                 Informe o número da conta Mercado Pago do parceiro para identificar os repasses. Essa informação não substitui as credenciais globais da GoTaxi.
               </p>
             </div>
 
-              <div className="border-t border-border pt-5 space-y-4">
-              <div>
-                 <p className="text-sm font-semibold text-foreground">Conta Mercado Pago para receber repasses</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                   Para receber repasses relacionados aos pagamentos via Mercado Pago, você precisa criar uma conta Mercado Pago.
-                   O Mercado Pago não transfere esse valor automaticamente para outro banco.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                 <label className="text-sm font-medium">Número da sua conta Mercado Pago</label>
-                <Input
-                  value={dadosRecebimento.numero_conta_mercado_pago}
-                  onChange={e => setDadosRecebimento(prev => ({ ...prev, numero_conta_mercado_pago: e.target.value }))}
-                  placeholder="Ex: 123456789"
-                  className="font-mono"
-                />
-                 <p className="text-xs text-muted-foreground">
-                   Informe o número da conta Mercado Pago criada em seu nome ou em nome da sua empresa.
-                 </p>
-              </div>
+            <div className="space-y-2 max-w-sm">
+               <label className="text-sm font-medium text-foreground">Número da conta Mercado Pago</label>
+              <Input
+                value={dadosRecebimento.numero_conta_mercado_pago}
+                onChange={e => setDadosRecebimento(prev => ({ ...prev, numero_conta_mercado_pago: e.target.value }))}
+                placeholder="Ex: 123456789"
+                className="font-mono bg-muted/30"
+              />
             </div>
+          </div>
 
+           <div className="pt-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             {pixError && (
-              <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive">
+               <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive">
                 <AlertCircle className="w-4 h-4 shrink-0" />{pixError}
               </div>
             )}
-
             <Button
               onClick={handleSavePix}
               disabled={savingPix}
-              className="w-full bg-green-600 hover:bg-green-700 shadow-md shadow-green-500/20"
+              className="min-w-[160px] bg-green-600 hover:bg-green-700 text-white shadow-md shadow-green-500/20"
             >
               {savingPix
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Salvando...</>
                 : savedPix
-                ? <><CheckCircle2 className="w-4 h-4 mr-2" />Chave PIX salva!</>
-                : <><Zap className="w-4 h-4 mr-2" />Salvar chave PIX</>
+                ? <><CheckCircle2 className="w-4 h-4 mr-2" />Chave Salva!</>
+               : <><Zap className="w-4 h-4 mr-2 fill-current" />Salvar dados de recebimento</>
               }
             </Button>
-          </CardContent>
-        </Card>
-
-        {/* Mercado Pago */}
-        <div className="md:col-span-1 mt-6">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <Wallet className="w-5 h-5 text-[#009EE3]" /> Integração Mercado Pago
-          </h3>
-          <p className="text-sm text-muted-foreground mt-1">
-            A GoTaxi processa os pagamentos pela conta global. Para receber repasses, mantenha uma conta Mercado Pago própria.
-          </p>
+          </div>
         </div>
-        <Card className="md:col-span-2 shadow-sm border-border/50 mt-0 md:mt-6 overflow-hidden">
-          <div className="bg-[#009EE3]/5 border-b border-[#009EE3]/10 px-6 py-4 flex items-center justify-between">
+      </SettingBlock>
+
+      <SettingBlock
+        title="Integração Mercado Pago"
+        description="A GoTaxi processa pagamentos pela conta global. Ative o checkout do Mercado Pago para o cliente."
+        icon={Wallet}
+      >
+        <div className="space-y-6">
+          <div className="bg-[#009EE3]/5 border border-[#009EE3]/20 rounded-xl p-5 flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
             <div>
-              <p className="font-semibold text-[#009EE3] flex items-center gap-2">
-                Configuração da integração
+              <div className="flex items-center gap-2.5 mb-1.5">
+                <p className="font-semibold text-[#009EE3]">Status da Integração Global</p>
                 {mpConfig.beta && (
-                  <span className="bg-[#009EE3] text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">BETA</span>
+                  <span className="bg-[#009EE3] text-white text-[9px] font-bold px-1.5 py-0.5 rounded-sm uppercase tracking-wider">BETA</span>
                 )}
                 {mpConfig.environment === "sandbox" && (
-                  <span className="bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">SANDBOX</span>
+                  <span className="bg-amber-100 text-amber-700 text-[9px] font-bold px-1.5 py-0.5 rounded-sm uppercase tracking-wider">SANDBOX</span>
                 )}
-                {mpConfig.configured && (
-                  <span className="bg-green-100 text-green-700 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3" /> Configurado
-                  </span>
-                )}
+              </div>
+              <p className="text-sm text-muted-foreground leading-relaxed max-w-lg">
+                As credenciais são globais da GoTaxi. {mpConfig.configured ? "Sua loja está apta a receber via app." : "Aguardando ativação por parte da GoTaxi."}
               </p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                As credenciais são globais, pertencem à GoTaxi e não são acessíveis aos parceiros.
-              </p>
+            </div>
+            {mpConfig.configured ? (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-green-100 text-green-700 text-xs font-semibold shrink-0">
+                <CheckCircle2 className="w-4 h-4" /> Ativa
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-100 text-amber-700 text-xs font-semibold shrink-0">
+                <AlertCircle className="w-4 h-4" /> Inativa
+              </div>
+            )}
+          </div>
+
+          <div className="bg-muted/10 border border-border/50 rounded-xl p-5 space-y-5">
+            <p className="font-semibold text-sm text-foreground">Preferências de Checkout</p>
+            {!mpConfig.configured && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>O Super Admin ainda precisa ativar a integração global do Mercado Pago. Depois disso, esta loja poderá ser ativada aqui.</span>
+              </div>
+            )}
+            
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">Pagamento no App (Mercado Pago)</p>
+                <p className="text-sm text-muted-foreground">O cliente paga diretamente no app. Processamento via GoTaxi.</p>
+              </div>
+              <Switch 
+                checked={mpConfig.mercadoPagoEnabled} 
+                onCheckedChange={v => setMpConfig(p => ({ ...p, mercadoPagoEnabled: v }))} 
+                disabled={!mpConfig.configured} 
+              />
+            </div>
+            
+            <div className="w-full h-px bg-border/50" />
+
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">Pagamento Direto (Entrega/Balcão)</p>
+                <p className="text-sm text-muted-foreground">O cliente paga na maquininha ou PIX direto para você no recebimento.</p>
+              </div>
+              <Switch 
+                checked={mpConfig.directPaymentEnabled} 
+                onCheckedChange={v => setMpConfig(p => ({ ...p, directPaymentEnabled: v }))} 
+              />
             </div>
           </div>
-          <CardContent className="p-6 space-y-5">
-            <div className={`rounded-xl border p-4 ${mpConfig.configured ? "bg-green-50 border-green-200" : "bg-amber-50 border-amber-200"}`}>
-              <p className={`text-sm font-semibold ${mpConfig.configured ? "text-green-700" : "text-amber-700"}`}>
-                {mpConfig.configured ? "Integração global da GoTaxi ativa" : "Integração global aguardando configuração"}
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">
-                {mpConfig.configured
-                  ? "Você pode escolher abaixo quais formas de pagamento deseja aceitar."
-                  : "A integração global ainda não foi ativada pela GoTaxi."}
-              </p>
-            </div>
 
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mt-6 space-y-4">
-              <p className="font-semibold text-sm text-foreground mb-2">Opções de Checkout</p>
-              
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">Aceitar Pagamentos via Mercado Pago</p>
-                  <p className="text-xs text-muted-foreground">O cliente pagará pelo app. O pagamento será processado pela conta global da GoTaxi.</p>
-                </div>
-                <Switch 
-                  checked={mpConfig.mercadoPagoEnabled} 
-                  onCheckedChange={v => setMpConfig(p => ({ ...p, mercadoPagoEnabled: v }))} 
-                  disabled={!mpConfig.configured} 
-                />
-              </div>
-              
-              <div className="border-t border-slate-200 pt-4 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">Aceitar Recebimento Direto</p>
-                  <p className="text-xs text-muted-foreground">O cliente pagará diretamente para você via Pix ou maquineta no ato da entrega (usa suas formas de pagamento configuradas acima).</p>
-                </div>
-                <Switch 
-                  checked={mpConfig.directPaymentEnabled} 
-                  onCheckedChange={v => setMpConfig(p => ({ ...p, directPaymentEnabled: v }))} 
-                />
-              </div>
-            </div>
-
+          <div className="pt-2 flex justify-end">
             {mpError && (
-              <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive">
+              <div className="flex items-center gap-2 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl text-sm text-destructive mr-4">
                 <AlertCircle className="w-4 h-4 shrink-0" />{mpError}
               </div>
             )}
-
             <Button
               onClick={handleSaveMp}
               disabled={savingMp}
-              className="w-full bg-[#009EE3] hover:bg-[#009EE3]/90 text-white shadow-md shadow-[#009EE3]/20"
+              className="min-w-[160px] bg-[#009EE3] hover:bg-[#009EE3]/90 text-white shadow-md shadow-[#009EE3]/20"
             >
               {savingMp
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Salvando...</>
                 : savedMp
-                ? <><CheckCircle2 className="w-4 h-4 mr-2" />Configuração salva!</>
-                : <><Save className="w-4 h-4 mr-2" />Salvar Configuração Mercado Pago</>
+                ? <><CheckCircle2 className="w-4 h-4 mr-2" />Salvo!</>
+                : <><Save className="w-4 h-4 mr-2" />Salvar Integração</>
               }
             </Button>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
+      </SettingBlock>
 
-        {/* Alterar Senha */}
-        <Card className="border-border">
-          <CardContent className="p-5 space-y-4">
-            <div className="flex items-center gap-2 mb-1">
-              <div className="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center">
-                <svg className="w-4 h-4 text-orange-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-              </div>
-              <div>
-                <h3 className="font-semibold text-sm text-foreground">Alterar Senha de Acesso</h3>
-                <p className="text-xs text-muted-foreground">Altere a senha de login da sua conta no painel.</p>
-              </div>
+      <SettingBlock
+        title="Segurança"
+        description="Altere a senha de acesso da sua conta."
+        icon={Lock}
+      >
+        <form onSubmit={handleAlterarSenha} className="space-y-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground">Senha Atual</label>
+              <Input type="password" value={senhaAtual} onChange={e => setSenhaAtual(e.target.value)}
+                placeholder="••••••••"
+                className="bg-muted/30"
+                autoComplete="current-password" />
             </div>
-            <form onSubmit={handleAlterarSenha} className="space-y-3">
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Senha atual</label>
-                <input type="password" value={senhaAtual} onChange={e => setSenhaAtual(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full bg-input border border-border rounded-lg px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
-                  autoComplete="current-password" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground flex items-center justify-between">
+                Nova Senha <span className="text-xs font-normal text-muted-foreground">Mín. 6 caracteres</span>
+              </label>
+              <Input type="password" value={novaSenha} onChange={e => setNovaSenha(e.target.value)}
+                placeholder="••••••••"
+                className="bg-muted/30"
+                autoComplete="new-password" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground">Confirmar Nova Senha</label>
+              <Input type="password" value={confirmaSenha} onChange={e => setConfirmaSenha(e.target.value)}
+                placeholder="••••••••"
+                className="bg-muted/30"
+                autoComplete="new-password" />
+            </div>
+          </div>
+
+          <div className="pt-2 flex flex-col sm:flex-row justify-between items-center gap-4">
+            {senhaMsg ? (
+              <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium w-full sm:w-auto ${senhaMsg.ok ? "text-green-600 bg-green-50" : "text-destructive bg-destructive/10"}`}>
+                {senhaMsg.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+                {senhaMsg.text}
               </div>
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Nova senha <span className="text-muted-foreground/60">(mínimo 6 caracteres)</span></label>
-                <input type="password" value={novaSenha} onChange={e => setNovaSenha(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full bg-input border border-border rounded-lg px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
-                  autoComplete="new-password" />
-              </div>
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Confirmar nova senha</label>
-                <input type="password" value={confirmaSenha} onChange={e => setConfirmaSenha(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full bg-input border border-border rounded-lg px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
-                  autoComplete="new-password" />
-              </div>
-              {senhaMsg && (
-                <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm ${senhaMsg.ok ? "bg-green-500/10 border border-green-500/20 text-green-600" : "bg-destructive/10 border border-destructive/20 text-destructive"}`}>
-                  {senhaMsg.ok
-                    ? <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    : <AlertCircle className="w-4 h-4 shrink-0" />}
-                  {senhaMsg.text}
-                </div>
-              )}
-              <Button type="submit" disabled={savingSenha || !senhaAtual || !novaSenha || !confirmaSenha}
-                className="w-full bg-orange-500 hover:bg-orange-600 shadow-md shadow-orange-500/20">
-                {savingSenha ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Alterando...</> : "Alterar Senha"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-      </div>
+            ) : (
+              <div /> // empty flex placeholder
+            )}
+            <Button type="submit" disabled={savingSenha || !senhaAtual || !novaSenha || !confirmaSenha}
+              variant="outline"
+              className="min-w-[160px] border-border hover:bg-muted/50 w-full sm:w-auto">
+              {savingSenha ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Alterando...</> : "Alterar Senha"}
+            </Button>
+          </div>
+        </form>
+      </SettingBlock>
     </motion.div>
   );
 }
