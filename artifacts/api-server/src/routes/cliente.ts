@@ -334,9 +334,10 @@ router.get("/afiliados/perfil", async (req, res) => {
 
     if (!rows.length) {
       const user = (await db.execute(sql`SELECT nome FROM usuarios WHERE id = ${usuarioId}`)).rows[0] as any;
+      const codigoTemporario = `TEMP_${usuarioId}`;
       const inserted = (await db.execute(sql`
         INSERT INTO afiliados (usuario_id, codigo)
-        VALUES (${usuarioId}, 'TEMP_${usuarioId}')
+        VALUES (${usuarioId}, ${codigoTemporario})
         ON CONFLICT (usuario_id) DO UPDATE SET usuario_id = afiliados.usuario_id
         RETURNING id
       `)).rows[0] as any;
