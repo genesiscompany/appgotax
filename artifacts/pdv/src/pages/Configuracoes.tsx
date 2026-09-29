@@ -281,6 +281,13 @@ export default function Configuracoes() {
         headers,
         body: JSON.stringify({ address }),
       });
+      if (!response.headers.get("content-type")?.includes("application/json")) {
+        throw new Error(
+          response.status === 404
+            ? "A busca de coordenadas ainda não está instalada na API da VPS. Atualize e reinicie o serviço da API com o arquivo deste BK."
+            : `A API não retornou coordenadas válidas (HTTP ${response.status}). Verifique o serviço da API.`
+        );
+      }
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Não foi possível localizar o endereço.");
       if (!Number.isFinite(result.lat) || !Number.isFinite(result.lng)) {

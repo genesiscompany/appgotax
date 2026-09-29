@@ -14,7 +14,7 @@ async function nominatimAutocomplete(input: string): Promise<any[]> {
   });
 
   const r = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-    headers: { "User-Agent": `GoTaxi-App/1.0 (${process.env.PUBLIC_DOMAIN ?? "gotaxi.com.br"})` },
+    headers: { "User-Agent": "GoTaxi-App/1.0 (gotaxiplus.replit.app)" },
   });
 
   if (!r.ok) return [];
@@ -81,7 +81,7 @@ router.get("/autocomplete", async (req, res) => {
 
   if (!input || input.length < 3) return res.json([]);
 
-  const key = process.env.GOOGLE_MAPS_KEY ?? "";
+  const key = process.env.GOOGLE_MAPS_SERVER_KEY || process.env.GOOGLE_MAPS_KEY || "";
 
   try {
     // Try Google first if key is available
@@ -115,7 +115,7 @@ router.get("/details", async (req, res) => {
     return res.json({ lat: null, lng: null, address: null });
   }
 
-  const key = process.env.GOOGLE_MAPS_KEY ?? "";
+  const key = process.env.GOOGLE_MAPS_SERVER_KEY || process.env.GOOGLE_MAPS_KEY || "";
   if (!key) return res.json({ lat: null, lng: null, address: null });
 
   try {
@@ -170,7 +170,7 @@ router.get("/geocode", async (req, res) => {
   try {
     const params = new URLSearchParams({ q: address, format: "json", limit: "1", countrycodes: "br", "accept-language": "pt-BR" });
     const r = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-      headers: { "User-Agent": `GoTaxi-App/1.0 (${process.env.PUBLIC_DOMAIN ?? "gotaxi.com.br"})` },
+      headers: { "User-Agent": "GoTaxi-App/1.0 (gotaxiplus.replit.app)" },
     });
     if (r.ok) {
       const data = await r.json() as any[];

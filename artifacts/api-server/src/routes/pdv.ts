@@ -1144,7 +1144,7 @@ router.post("/config-area/geocode", async (req, res) => {
     if (!response.ok) return res.status(502).json({ error: "Google Maps não respondeu. Tente novamente." });
     const result = await response.json() as {
       status: string;
-      results?: { formatted_address: string; partial_match?: boolean; geometry?: { location?: { lat: number; lng: number } } }[];
+      results?: { formatted_address: string; partial_match?: boolean; geometry?: { location?: { lat: number; lng: number }; location_type?: string } }[];
     };
     if (result.status === "ZERO_RESULTS") {
       return res.status(404).json({ error: "Endereço não encontrado. Informe rua, número, cidade e estado." });
@@ -1155,7 +1155,8 @@ router.post("/config-area/geocode", async (req, res) => {
     if (!result.results?.length) return res.status(404).json({ error: "Endereço não encontrado." });
     const match = result.results[0];
     const location = match.geometry?.location;
-    if (match.partial_match || !location || !Number.isFinite(location.lat) || !Number.isFinite(location.lng)) {
+    if (match.partial_match || !location || !Number.isFinite(location.lat) || !Number.isFinite(location.lng) ||
+        !["ROOFTOP", "RANGE_INTERPOLATED"].includes(match.geometry?.location_type ?? "")) {
       return res.status(422).json({ error: "Endereço incompleto ou ambíguo. Informe rua, número, cidade e estado." });
     }
     return res.json({ lat: location.lat, lng: location.lng, address: match.formatted_address });
