@@ -685,23 +685,31 @@ router.get("/wallet/topup/pending", requireCustomer, async (req, res) => {
   const pix = sanitizedPixData(row?.metadata?.pix);
   res.json({ topup: pix ? { transactionId: Number(row.id), amountCents: Number(row.gross_amount_cents), pix } : null });
 });
-router.post("/wallet/topup", requireCustomer, async (req, res) => {
+router.post("/wallet/topup", (req, res, next) => {
+  // Log only the outcome, not the customer token, payer data or Pix payload.
+  res.once("finish", () => console.info("[wallet_topup] response", { status: res.statusCode }));
+  next();
+}, requireCustomer, async (req, res) => {
   const amountCents = Number(req.body?.amountCents);
   if (!Number.isInteger(amountCents) || amountCents < 500 || amountCents > 100000000) { res.status(400).json({ error: "invalid_amount_cents" }); return; }
+  let stage = "config";
   try {
     const config = await globalMercadoPagoConfig();
     if (!globalIntegrationConfigured(config)) { missingCredentials(res); return; }
     const token = await globalAccessToken();
     if (!token) { missingCredentials(res); return; }
+    stage = "payer";
     const customerId = Number((req as any).customerId);
     const users = await db.execute(sql`SELECT email FROM usuarios WHERE id = ${customerId} LIMIT 1`);
     const email = String((users.rows[0] as any)?.email ?? "").trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { res.status(409).json({ error: "customer_email_required" }); return; }
+    stage = "record";
     const externalReference = `wallet-topup:${customerId}:${randomUUID()}`;
     const idempotencyKey = `topup:${externalReference}`;
     const tx = await db.execute(sql`INSERT INTO payment_transactions (customer_id, module, reference_id, payment_source, method, status, gross_amount_cents, platform_fee_cents, provider_preference_id, init_point, sandbox_init_point, external_reference, idempotency_key)
       VALUES (${customerId}, 'wallet_topup', ${externalReference}, 'mercado_pago', 'pix', 'pending', ${amountCents}, 0, NULL, NULL, NULL, ${externalReference}, ${idempotencyKey}) RETURNING id`);
     const transactionId = Number((tx.rows[0] as any).id);
+    stage = "mercado_pago";
     const payment = await mp("/v1/payments", token, {
       method: "POST", headers: { "X-Idempotency-Key": idempotencyKey },
       body: JSON.stringify({
@@ -713,12 +721,22 @@ router.post("/wallet/topup", requireCustomer, async (req, res) => {
     const pix = sanitizedPixData(payment.point_of_interaction?.transaction_data);
     const providerPaymentId = String(payment.id ?? "");
     if (!providerPaymentId || !pix?.qrCode) throw new Error("pix_code_missing");
+    stage = "persist_pix";
     await db.execute(sql`UPDATE payment_transactions SET provider_payment_id = ${providerPaymentId},
       metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ pix })}::jsonb,
       updated_at = NOW() WHERE id = ${transactionId}`);
     // Even an immediately approved provider response must be settled by the verified webhook.
     res.status(201).json({ transactionId, amountCents, pix, status: payment.status, ...BETA });
-  } catch (err) { (req as any).log?.error({ err: err instanceof Error ? err.message : "unknown" }, "payment topup failed"); res.status(502).json({ error: "mercado_pago_unavailable", message: "O Mercado Pago recusou a criação da recarga. Confira se as credenciais e o ambiente estão corretos.", ...BETA }); }
+  } catch (err) {
+    const code = err instanceof MercadoPagoApiError ? err.providerCode : (err as { code?: unknown })?.code;
+    console.error("[wallet_topup] failed", {
+      stage,
+      kind: err instanceof MercadoPagoApiError ? "provider" : err instanceof Error ? err.name : "unknown",
+      code: typeof code === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : undefined,
+      providerStatus: err instanceof MercadoPagoApiError ? err.status : undefined,
+    });
+    res.status(502).json({ error: "mercado_pago_unavailable", message: "O Mercado Pago recusou a criação da recarga. Confira se as credenciais e o ambiente estão corretos.", ...BETA });
+  }
 });
 router.post("/checkout", requireCustomer, async (req, res) => {
   const { module, referenceId, mercadoPagoMethod, paymentToken } = req.body || {};
