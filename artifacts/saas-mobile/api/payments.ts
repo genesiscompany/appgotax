@@ -52,6 +52,12 @@ export type CheckoutResponse = {
   sandbox?: boolean;
 };
 
+export type WalletPixTopup = {
+  transactionId: number;
+  amountCents: number;
+  pix: { qrCode: string; qrCodeBase64?: string | null; ticketUrl?: string | null };
+};
+
 export type ServicePaymentStatus = {
   paymentStatus: string;
   paymentSource?: string;
@@ -125,7 +131,7 @@ export async function getWalletLedger(token: string): Promise<WalletLedgerItem[]
   }));
 }
 
-export async function topupWallet(token: string, amountCents: number): Promise<CheckoutResponse> {
+export async function topupWallet(token: string, amountCents: number): Promise<WalletPixTopup> {
   const res = await fetch(`${getApiBase()}/payments/wallet/topup`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -133,6 +139,22 @@ export async function topupWallet(token: string, amountCents: number): Promise<C
   });
   if (!res.ok) throw await paymentApiError(res, "Não foi possível iniciar a recarga.");
   return res.json();
+}
+
+export async function getPendingWalletTopup(token: string): Promise<WalletPixTopup | null> {
+  const res = await fetch(`${getApiBase()}/payments/wallet/topup/pending`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw await paymentApiError(res, "Não foi possível consultar o Pix pendente.");
+  return (await res.json()).topup ?? null;
+}
+
+export async function getWalletTopupStatus(token: string, transactionId: number): Promise<string> {
+  const res = await fetch(`${getApiBase()}/payments/transactions/${transactionId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw await paymentApiError(res, "Não foi possível consultar o pagamento.");
+  return (await res.json()).transaction.status;
 }
 
 async function paymentApiError(res: Response, fallback: string): Promise<Error> {
@@ -143,7 +165,7 @@ async function paymentApiError(res: Response, fallback: string): Promise<Error> 
     unauthorized: "Sua sessão expirou. Entre novamente na conta.",
     invalid_card_token: "Os dados do cartão não puderam ser validados.",
     mercado_pago_card_unavailable: "O Mercado Pago não conseguiu salvar o cartão. Confira os dados e tente novamente.",
-    customer_email_required: "Adicione um e-mail válido ao seu cadastro antes de salvar o cartão.",
+    customer_email_required: "Adicione um e-mail válido ao seu cadastro antes de pagar com Pix.",
     saved_card_not_found: "O cartão salvo não foi encontrado.",
     saved_card_required: "Cadastre um cartão em Perfil > Pagamento antes de continuar.",
     saved_card_in_use: "Este cartão está vinculado a uma corrida ou entrega em andamento. Troque ou remova depois da conclusão.",
@@ -174,13 +196,31 @@ export async function getSavedCard(token: string): Promise<SavedCard | null> {
 }
 
 export async function saveCard(token: string, cardToken: string): Promise<SavedCard> {
-  const res = await fetch(`${getApiBase()}/payments/cards`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ cardToken }),
-  });
-  if (!res.ok) throw await paymentApiError(res, "Não foi possível salvar o cartão.");
-  return res.json();
+  let res: Response;
+  try {
+    res = await fetch(`${getApiBase()}/payments/cards`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ cardToken }),
+    });
+  } catch {
+    throw new Error("Não foi possível conectar à API para salvar o cartão. Verifique sua conexão e tente novamente.");
+  }
+  if (!res.headers.get("content-type")?.includes("application/json")) {
+    throw new Error(`A API não respondeu no formato esperado ao salvar o cartão (HTTP ${res.status}). Verifique a publicação do serviço da API.`);
+  }
+  if (!res.ok) {
+    const error = await paymentApiError(res, "Não foi possível salvar o cartão.");
+    if (error instanceof PaymentApiError && error.code === `http_${res.status}`) {
+      throw new Error(`A API recusou o cadastro do cartão (HTTP ${res.status}). Confira o serviço da API no EasyPanel.`);
+    }
+    throw error;
+  }
+  const data = await res.json();
+  if (!data?.cardId || !data?.lastFour) {
+    throw new Error("A API não confirmou o cartão salvo. Consulte o cartão cadastrado antes de tentar novamente.");
+  }
+  return data;
 }
 
 export async function deleteSavedCard(token: string, cardId: string): Promise<void> {

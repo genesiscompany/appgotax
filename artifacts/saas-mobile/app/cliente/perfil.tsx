@@ -252,9 +252,14 @@ export default function PerfilScreen() {
     try {
       const card = await saveCard(customer.token, cardToken);
       setSavedCard(card);
-      await updateProfile({ formaPagamento: "cartao" });
       setCardTokenizerVisible(false);
-      Alert.alert("Cartão salvo", `Final ${card.lastFour}. Agora ele pode ser usado sem preencher os dados a cada corrida.`);
+      try {
+        const result = await updateProfile({ formaPagamento: "cartao" });
+        if (!result.ok) throw new Error(result.error || "Não foi possível selecionar o cartão.");
+        Alert.alert("Cartão salvo", `Final ${card.lastFour}. Agora ele pode ser usado sem preencher os dados a cada corrida.`);
+      } catch {
+        Alert.alert("Cartão salvo", `O cartão final ${card.lastFour} foi salvo, mas não foi definido como forma de pagamento. Selecione-o novamente no Perfil.`);
+      }
     } catch (error) {
       if (isPaymentUnauthorized(error)) {
         await encerrarSessaoExpirada();
