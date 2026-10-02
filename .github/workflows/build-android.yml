@@ -77,7 +77,7 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           EAS_NO_VCS: '1'
-          EXPO_PUBLIC_DOMAIN: 'gotaxi.com.br'
+          EXPO_PUBLIC_DOMAIN: 'api.gotaxi.com.br'
           EXPO_PUBLIC_GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
         run: |
           eas build \

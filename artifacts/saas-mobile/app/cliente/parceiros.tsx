@@ -116,7 +116,7 @@ export default function ParceirosScreen() {
     // CRÍTICO: limpar sessão anterior antes de autenticar (evita vazamento entre tenants)
     await authLogout();
     const pdvUrl = process.env.EXPO_PUBLIC_DOMAIN
-      ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/pdv/`
+      ? "https://pdv.gotaxi.com.br/"
       : "http://localhost:5173/pdv/";
     console.log("[parceiro-login] POST", `${API_BASE}/pdv/login`, "email=", loginEmail.trim().toLowerCase());
     let res: Response;

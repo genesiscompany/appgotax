@@ -13,7 +13,7 @@ const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "mercadopago", label: "Mercado Pago (Beta)", icon: Wallet },
 ];
 
-const PROD_BASE = "https://admin.gotaxi.com.br";
+const PROD_BASE = "https://api.gotaxi.com.br";
 const CONFIG_API = "/api/configuracoes/admin";
 const PAYMENTS_API_BASE = (() => {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
