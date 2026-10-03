@@ -7,6 +7,7 @@ import bcrypt from "bcryptjs";
 import { broadcastToEmpresa, sendExpoPushToEmpresa } from "./pdv";
 import { dispatchEntregaToEntregadores } from "./motorista-app";
 import { customerIdFromRequest } from "../lib/customerToken";
+import { roadRoute } from "../lib/roadDistance";
 
 const router: IRouter = Router();
 
@@ -714,9 +715,8 @@ router.post("/entrega/solicitar", async (req, res) => {
     }
     let authoritativeKm = paymentSource === "direto" ? (Number(distancia_km) || 0) : 0;
     if (validCoords) {
-      const [lat1, lng1, lat2, lng2] = coords.map(x => x * Math.PI / 180);
-      const h = Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lng2 - lng1) / 2) ** 2;
-      authoritativeKm = Math.round(6371 * 2 * Math.asin(Math.sqrt(h)) * 10) / 10;
+      const route = await roadRoute(coords[0], coords[1], coords[2], coords[3]);
+      authoritativeKm = Math.round(route.km * 10) / 10;
     }
     const category = ["padrao", "expressa", "grande"].includes(String(categoria)) ? String(categoria) : "padrao";
     const defaults: Record<string, [number, number, number]> = { padrao: [10, 3, 2], expressa: [15, 3, 3], grande: [20, 3, 4] };

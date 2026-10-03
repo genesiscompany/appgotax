@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { customerIdFromRequest } from "../lib/customerToken";
+import { roadRoute } from "../lib/roadDistance";
 
 const router: IRouter = Router();
 
@@ -66,6 +67,58 @@ function estimaEspera(tipo: string): number {
   return tipo === "premium" ? 8 : tipo === "conforto" ? 5 : 3;
 }
 
+// ── POST /api/motorista/estimativa — mesma regra de preço do /solicitar ─────
+router.post("/estimativa", async (req, res) => {
+  try {
+    const { lat_origem, lng_origem, lat_destino, lng_destino, categoria_nome, payment_source } = req.body;
+    const coords = [lat_origem, lng_origem, lat_destino, lng_destino].map(Number);
+    const validCoords = coords.every(Number.isFinite)
+      && Math.abs(coords[0]) <= 90 && Math.abs(coords[2]) <= 90
+      && Math.abs(coords[1]) <= 180 && Math.abs(coords[3]) <= 180;
+    const categoria = String(categoria_nome || "");
+    if (!validCoords || !categoria) return res.status(422).json({ error: "authoritative_quote_unavailable" });
+    const tariffRows = await db.execute(sql`SELECT taxa_minima, taxa_por_km FROM categorias_corrida WHERE nome = ${categoria} AND ativo = true LIMIT 1`);
+    const tariff = tariffRows.rows[0] as any;
+    if (!tariff) return res.status(422).json({ error: "authoritative_quote_unavailable" });
+    const rawSource = payment_source === "carteira" ? "wallet" : String(payment_source || "direto");
+    const paymentSource = ["direto", "mercado_pago", "wallet"].includes(rawSource) ? rawSource : "direto";
+
+    const route = await roadRoute(coords[0], coords[1], coords[2], coords[3]);
+    const tripKm = Math.max(0.1, Math.round(route.km * 100) / 100);
+
+    const nearestRows = await db.execute(`
+      SELECT (6371 * acos(LEAST(1.0,
+        cos(radians(${coords[0]})) * cos(radians(ma.lat)) *
+        cos(radians(ma.lng) - radians(${coords[1]})) +
+        sin(radians(${coords[0]})) * sin(radians(ma.lat))
+      ))) AS distancia_motorista_km
+      FROM motoristas_app ma
+      WHERE ma.online = true AND ma.lat IS NOT NULL AND ma.lng IS NOT NULL
+        AND ma.ultimo_ping > NOW() - INTERVAL '3 minutes'
+        AND ma.status = 'aprovado'
+        AND (
+          ('${paymentSource}' = 'direto' AND ma.aceita_pagamento_direto = true)
+          OR ('${paymentSource}' IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true)
+        )
+        AND EXISTS (SELECT 1 FROM motorista_categorias mc WHERE mc.motorista_id = ma.id AND mc.categoria_nome = '${esc(categoria)}')
+      ORDER BY distancia_motorista_km ASC LIMIT 1
+    `);
+    const pickupKm = Math.max(0, Number((nearestRows.rows[0] as any)?.distancia_motorista_km ?? 0));
+    const km = Math.round((tripKm + pickupKm) * 100) / 100;
+    const price = km <= 3 ? Number(tariff.taxa_minima) : Number(tariff.taxa_por_km) * km;
+    return res.json({
+      distancia_viagem_km: tripKm,
+      distancia_cobrada_km: km,
+      tempo_viagem_min: route.minutos,
+      valor: Math.round(price * 100) / 100,
+      fonte: route.fonte,
+    });
+  } catch (err) {
+    console.error("[estimativa]", err);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
 // ── POST /api/motorista/solicitar ────────────────────────────────────────────
 router.post("/solicitar", async (req, res) => {
   try {
@@ -93,9 +146,8 @@ router.post("/solicitar", async (req, res) => {
       && Math.abs(coords[1]) <= 180 && Math.abs(coords[3]) <= 180;
     let quotedKm: number | null = null;
     if (validCoords) {
-      const [lat1, lng1, lat2, lng2] = coords.map(x => x * Math.PI / 180);
-      const h = Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lng2 - lng1) / 2) ** 2;
-      quotedKm = Math.max(0.1, Math.round(6371 * 2 * Math.asin(Math.sqrt(h)) * 100) / 100);
+      const route = await roadRoute(coords[0], coords[1], coords[2], coords[3]);
+      quotedKm = Math.max(0.1, Math.round(route.km * 100) / 100);
     }
     const requestedCategory = String(categoria_nome || tipo_veiculo || "");
     const tariffRows = requestedCategory
