@@ -706,8 +706,11 @@ router.post("/wallet/topup", (req, res, next) => {
     stage = "payer";
     const customerId = Number((req as any).customerId);
     const users = await db.execute(sql`SELECT email FROM usuarios WHERE id = ${customerId} LIMIT 1`);
-    const email = String((users.rows[0] as any)?.email ?? "").trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { res.status(409).json({ error: "customer_email_required" }); return; }
+    const storedEmail = String((users.rows[0] as any)?.email ?? "").trim().toLowerCase();
+    // Phone-only signups get an internal "@cliente.gotaxi" address that Mercado Pago rejects.
+    const email = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/.test(storedEmail) && !storedEmail.endsWith("@cliente.gotaxi")
+      ? storedEmail
+      : `cliente${customerId}@gotaxi.com.br`;
     stage = "record";
     const externalReference = `wallet-topup:${customerId}:${randomUUID()}`;
     const idempotencyKey = `topup:${externalReference}`;
