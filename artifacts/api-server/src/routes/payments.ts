@@ -54,14 +54,19 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 }
 function missingCredentials(res: Response) { res.status(503).json({ error: "mercado_pago_not_configured", message: "Configure e ative as credenciais do Mercado Pago no Super Admin.", ...BETA }); }
 class MercadoPagoApiError extends Error {
-  constructor(public status: number, public providerCode?: string) {
+  constructor(public status: number, public providerCode?: string, public providerMessage?: string, public providerCauses?: string[]) {
     super(`Mercado Pago request failed (${status}${providerCode ? `: ${providerCode}` : ""})`);
   }
 }
 async function mp(path: string, token: string, options: RequestInit = {}) {
   const response = await fetch(`https://api.mercadopago.com${path}`, { ...options, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) } });
   const body: any = await response.json().catch(() => ({}));
-  if (!response.ok) throw new MercadoPagoApiError(response.status, String(body?.code ?? body?.error ?? ""));
+  if (!response.ok) {
+    const causes = Array.isArray(body?.cause)
+      ? body.cause.map((c: any) => `${c?.code ?? ""} ${c?.description ?? ""}`.trim().slice(0, 200)).filter(Boolean)
+      : [];
+    throw new MercadoPagoApiError(response.status, String(body?.code ?? body?.error ?? ""), String(body?.message ?? "").slice(0, 300), causes);
+  }
   return body as any;
 }
 function publicApiBaseUrl() {
@@ -734,8 +739,11 @@ router.post("/wallet/topup", (req, res, next) => {
       kind: err instanceof MercadoPagoApiError ? "provider" : err instanceof Error ? err.name : "unknown",
       code: typeof code === "string" && /^[a-zA-Z0-9_.-]{1,80}$/.test(code) ? code : undefined,
       providerStatus: err instanceof MercadoPagoApiError ? err.status : undefined,
+      providerMessage: err instanceof MercadoPagoApiError ? err.providerMessage : undefined,
+      providerCauses: err instanceof MercadoPagoApiError ? err.providerCauses : undefined,
     });
-    res.status(502).json({ error: "mercado_pago_unavailable", message: "O Mercado Pago recusou a criação da recarga. Confira se as credenciais e o ambiente estão corretos.", ...BETA });
+    const detail = err instanceof MercadoPagoApiError ? (err.providerMessage || err.providerCauses?.join("; ")) : undefined;
+    res.status(502).json({ error: "mercado_pago_unavailable", message: `O Mercado Pago recusou a criação da recarga.${detail ? ` Motivo: ${detail}` : " Confira se as credenciais e o ambiente estão corretos."}`, providerDetail: detail, ...BETA });
   }
 });
 router.post("/checkout", requireCustomer, async (req, res) => {
