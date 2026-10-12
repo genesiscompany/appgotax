@@ -734,7 +734,10 @@ router.post("/wallet/topup", (req, res, next) => {
       metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ pix })}::jsonb,
       updated_at = NOW() WHERE id = ${transactionId}`);
     // Even an immediately approved provider response must be settled by the verified webhook.
-    res.status(201).json({ transactionId, amountCents, pix, status: payment.status, ...BETA });
+    // Older installed app builds open `initPoint`; Mercado Pago's Pix ticket page serves that role.
+    // Mercado Pago may omit ticket_url, so fall back to our own Pix page keyed by the unguessable reference.
+    const payUrl = pix.ticketUrl ?? `${publicApiBaseUrl()}/api/payments/pix/${encodeURIComponent(externalReference)}`;
+    res.status(201).json({ transactionId, amountCents, pix, initPoint: payUrl, sandboxInitPoint: payUrl, status: payment.status, ...BETA });
   } catch (err) {
     const code = err instanceof MercadoPagoApiError ? err.providerCode : (err as { code?: unknown })?.code;
     console.error("[wallet_topup] failed", {
@@ -748,6 +751,25 @@ router.post("/wallet/topup", (req, res, next) => {
     const detail = err instanceof MercadoPagoApiError ? (err.providerMessage || err.providerCauses?.join("; ")) : undefined;
     res.status(502).json({ error: "mercado_pago_unavailable", message: `O Mercado Pago recusou a criação da recarga.${detail ? ` Motivo: ${detail}` : " Confira se as credenciais e o ambiente estão corretos."}`, providerDetail: detail, ...BETA });
   }
+});
+router.get("/pix/:reference", async (req, res) => {
+  const reference = String(req.params.reference ?? "");
+  if (!/^wallet-topup:\d+:[0-9a-f-]{36}$/.test(reference)) { res.status(404).send("Pagamento não encontrado."); return; }
+  const rows = await db.execute(sql`SELECT gross_amount_cents, status, metadata FROM payment_transactions WHERE external_reference = ${reference} LIMIT 1`);
+  const row = rows.rows[0] as any;
+  const meta = typeof row?.metadata === "string" ? JSON.parse(row.metadata) : row?.metadata;
+  const pix = sanitizedPixData(meta?.pix);
+  if (!row || !pix?.qrCode) { res.status(404).send("Pagamento não encontrado."); return; }
+  const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  const amount = (Number(row.gross_amount_cents) / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  const img = pix.qrCodeBase64 && /^[A-Za-z0-9+/=]+$/.test(pix.qrCodeBase64) ? `<img alt="QR Code Pix" src="data:image/png;base64,${pix.qrCodeBase64}">` : "";
+  const paid = row.status === "approved";
+  res.set("Cache-Control", "no-store").type("html").send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pagar com Pix</title>
+<style>body{font-family:system-ui,sans-serif;background:#f1f5f9;margin:0;padding:24px;color:#0f172a}main{max-width:420px;margin:auto;background:#fff;border-radius:16px;padding:24px;text-align:center}img{width:240px;height:240px}textarea{width:100%;height:96px;font-size:12px;border:1px solid #cbd5e1;border-radius:8px;padding:8px;box-sizing:border-box}button{margin-top:12px;width:100%;padding:14px;border:0;border-radius:12px;background:#00B1EA;color:#fff;font-size:16px;font-weight:600}</style></head>
+<body><main><h1>Recarga GoTaxi</h1><p style="font-size:22px;font-weight:700">${amount}</p>
+${paid ? "<p><strong>Pagamento confirmado.</strong> Você já pode voltar ao app.</p>" : `${img}<p>Escaneie o QR Code ou copie o código Pix e pague no app do seu banco.</p>
+<textarea id="c" readonly>${esc(pix.qrCode)}</textarea><button onclick="navigator.clipboard.writeText(document.getElementById('c').value).then(()=>this.textContent='Código copiado!')">Copiar código Pix</button>
+<p style="font-size:13px;color:#64748b">O saldo entra na carteira após a confirmação do pagamento.</p>`}</main></body></html>`);
 });
 router.post("/checkout", requireCustomer, async (req, res) => {
   const { module, referenceId, mercadoPagoMethod, paymentToken } = req.body || {};
