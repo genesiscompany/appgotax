@@ -7,6 +7,7 @@ import path from "path";
 import fs from "fs";
 import { uploadImageToGCS } from "../lib/uploadImage";
 import { issueCustomerToken, verifyCustomerToken } from "../lib/customerToken";
+import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -80,7 +81,7 @@ router.patch("/cliente-perfil", async (req, res) => {
 
     const drizzleUpdates: Record<string, string | null> = {};
     if (nome?.trim()) drizzleUpdates.nome = nome.trim();
-    if (telefone) drizzleUpdates.telefone = String(telefone).replace(/\D/g, "");
+    if (telefone) drizzleUpdates.telefone = normalizarTelefone(telefone);
     if (novaSenha && novaSenha.length >= 4) drizzleUpdates.senhaHash = novaSenha;
     if (endereco !== undefined) drizzleUpdates.endereco = endereco || null;
     if (formaPagamento !== undefined) drizzleUpdates.formaPagamento = formaPagamento || null;
@@ -90,7 +91,7 @@ router.patch("/cliente-perfil", async (req, res) => {
     }
 
     if (drizzleUpdates.telefone) {
-      const existing = await db.select().from(usuariosTable).where(eq(usuariosTable.telefone, drizzleUpdates.telefone)).limit(1);
+      const existing = await db.select().from(usuariosTable).where(sql`${telefoneNormalizadoSql("telefone")} = ${drizzleUpdates.telefone}`).limit(1);
       if (existing[0] && existing[0].id !== userId) {
         return res.status(400).json({ error: "conflict", message: "Telefone já usado por outra conta" });
       }
@@ -153,9 +154,9 @@ router.post("/cliente-login", async (req, res) => {
     if (!telefone || !senha) {
       return res.status(400).json({ error: "bad_request", message: "Telefone e senha são obrigatórios" });
     }
-    const num = String(telefone).replace(/\D/g, "");
+    const num = normalizarTelefone(telefone);
     const [usuario] = await db.select().from(usuariosTable)
-      .where(eq(usuariosTable.telefone, num))
+      .where(sql`${telefoneNormalizadoSql("telefone")} = ${num} AND papel = 'cliente'`)
       .limit(1);
     if (!usuario || usuario.papel !== "cliente") {
       return res.status(401).json({ error: "unauthorized", message: "Telefone não encontrado" });
@@ -214,8 +215,11 @@ router.post("/cliente-register", async (req, res) => {
       return res.status(400).json({ error: "bad_request", message: "Senha deve ter ao menos 4 caracteres" });
     }
     await ensureUsuariosReferral();
-    const num = String(telefone).replace(/\D/g, "");
-    const existing = await db.select().from(usuariosTable).where(eq(usuariosTable.telefone, num)).limit(1);
+    const num = normalizarTelefone(telefone);
+    if (num.length < 8) {
+      return res.status(400).json({ error: "bad_request", message: "Telefone inválido" });
+    }
+    const existing = await db.select().from(usuariosTable).where(sql`${telefoneNormalizadoSql("telefone")} = ${num}`).limit(1);
     if (existing[0]) {
       return res.status(409).json({ error: "conflict", message: "Telefone já cadastrado" });
     }
@@ -244,7 +248,10 @@ router.post("/cliente-register", async (req, res) => {
         is_afiliado: false,
       },
     });
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.cause?.code === "23505" || err?.code === "23505") {
+      return res.status(409).json({ error: "conflict", message: "Telefone já cadastrado" });
+    }
     console.error(err);
     return res.status(500).json({ error: "server_error", message: "Erro interno" });
   }

@@ -10,6 +10,7 @@ import { finalizeServicePayment, settleServiceEarning } from "./payments";
 import { issueMotoristaToken, motoristaIdFromRequest } from "../lib/motoristaToken";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { encryptToken } from "./payments";
+import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
 import { gerarComissaoCliente } from "../lib/comissaoAfiliado";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
@@ -473,10 +474,14 @@ router.post("/cadastro", async (req: Request, res: Response) => {
   if (!nome || !telefone || !pin) return res.status(400).json({ error: "nome, telefone e PIN são obrigatórios" });
   if (String(pin).length < 4) return res.status(400).json({ error: "PIN deve ter pelo menos 4 dígitos" });
   const tipo = tipo_profissional || "motorista";
+  const telefoneNum = normalizarTelefone(telefone);
+  if (telefoneNum.length < 8) return res.status(400).json({ error: "Telefone inválido" });
   try {
+    const existente = await db.execute(sql`SELECT id FROM motoristas_app WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} LIMIT 1`);
+    if (existente.rows.length) return res.status(409).json({ error: "Telefone já cadastrado" });
     const rows = await db.execute(sql`
       INSERT INTO motoristas_app (nome, telefone, senha_pin, cpf, email, cidade, estado, tipo_profissional, indicado_por)
-      VALUES (${nome}, ${telefone}, ${String(pin)}, ${cpf || null}, ${email || null}, ${cidade || null}, ${estado || null}, ${tipo}, ${indicado_por || null})
+      VALUES (${nome}, ${telefoneNum}, ${String(pin)}, ${cpf || null}, ${email || null}, ${cidade || null}, ${estado || null}, ${tipo}, ${indicado_por || null})
        RETURNING id, nome, telefone, status, tipo_profissional, criado_em,
                  aceita_pagamento_direto, aceita_pagamento_app
     `);
@@ -506,7 +511,7 @@ router.post("/login", async (req: Request, res: Response) => {
              percentual_repasse, saldo, total_ganhos, total_corridas, avaliacao_media, criado_em,
               status_repasse, pix_tipo, pix_chave, pix_imagem_url, codigo_referral,
               aceita_pagamento_direto, aceita_pagamento_app
-      FROM motoristas_app WHERE telefone = ${telefone} AND senha_pin = ${String(pin)} AND ativo = true
+      FROM motoristas_app WHERE ${telefoneNormalizadoSql("telefone")} = ${normalizarTelefone(telefone)} AND senha_pin = ${String(pin)} AND ativo = true
     `);
     if (!rows.rows.length) return res.status(401).json({ error: "Telefone ou PIN incorretos" });
     const motorista = rows.rows[0] as any;

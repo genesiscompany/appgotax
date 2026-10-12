@@ -1,5 +1,6 @@
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
+import { normalizarTelefone, telefoneNormalizadoSql } from "./telefone";
 
 export function decodeClienteToken(token: string | undefined | null): number | null {
   if (!token) return null;
@@ -55,12 +56,12 @@ async function resolveAfiliadoByCode(
     const m = byMoto[0];
     const emailShadow = (m.email || `mot${m.id}@motorista.gotaxi`).toLowerCase();
     let shadow = (await db.execute(sql`
-      SELECT id FROM usuarios WHERE LOWER(email) = ${emailShadow} OR telefone = ${m.telefone} LIMIT 1
+      SELECT id FROM usuarios WHERE LOWER(email) = ${emailShadow} OR ${telefoneNormalizadoSql("telefone")} = ${normalizarTelefone(m.telefone)} LIMIT 1
     `)).rows as any[];
     if (!shadow.length) {
       shadow = (await db.execute(sql`
         INSERT INTO usuarios (nome, email, senha_hash, telefone, empresa_id, papel, ativo)
-        VALUES (${m.nome}, ${emailShadow}, ${String(m.senha_pin)}, ${m.telefone}, 1, 'cliente', true)
+        VALUES (${m.nome}, ${emailShadow}, ${String(m.senha_pin)}, ${normalizarTelefone(m.telefone)}, 1, 'cliente', true)
         RETURNING id
       `)).rows as any[];
     }

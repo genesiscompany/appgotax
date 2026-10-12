@@ -8,6 +8,7 @@ import { broadcastToEmpresa, sendExpoPushToEmpresa } from "./pdv";
 import { dispatchEntregaToEntregadores } from "./motorista-app";
 import { customerIdFromRequest } from "../lib/customerToken";
 import { roadRoute } from "../lib/roadDistance";
+import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
 
 const router: IRouter = Router();
 
@@ -766,9 +767,9 @@ router.post("/parceiro-register", async (req, res) => {
     }
 
     // Check if phone already exists
-    const phoneNum = String(whatsapp).replace(/\D/g, "");
+    const phoneNum = normalizarTelefone(whatsapp);
     if (phoneNum.length >= 8) {
-      const existingPhone = await db.execute(sql`SELECT id FROM usuarios WHERE telefone = ${phoneNum} LIMIT 1`);
+      const existingPhone = await db.execute(sql`SELECT id FROM usuarios WHERE ${telefoneNormalizadoSql("telefone")} = ${phoneNum} LIMIT 1`);
       if ((existingPhone.rows as any[]).length > 0) {
         return res.status(409).json({ error: "conflict", message: "Já existe uma conta com este WhatsApp" });
       }
@@ -789,7 +790,7 @@ router.post("/parceiro-register", async (req, res) => {
     // Create usuario
     const userRow = await db.execute(sql`
       INSERT INTO usuarios (nome, email, senha_hash, papel, empresa_id, telefone)
-      VALUES (${nome.trim()}, ${email.toLowerCase().trim()}, ${senhaHash}, 'parceiro', ${empresa.id}, ${whatsapp.replace(/\D/g, "")})
+      VALUES (${nome.trim()}, ${email.toLowerCase().trim()}, ${senhaHash}, 'parceiro', ${empresa.id}, ${phoneNum})
       RETURNING id, nome, email, papel, empresa_id
     `);
     const usuario = (userRow.rows as any[])[0];

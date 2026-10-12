@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
 
 const router: IRouter = Router();
 const JWT_SECRET = process.env.JWT_SECRET || "afiliados-gotaxi-secret-2024";
@@ -45,7 +46,7 @@ router.post("/login", async (req, res) => {
     if (!ident || !senha) return res.status(400).json({ error: "Informe usuário e senha" });
 
     const isEmail = ident.includes("@");
-    const telefoneNum = ident.replace(/\D/g, "");
+    const telefoneNum = normalizarTelefone(ident);
 
     // 1) Tenta em usuarios por email OU telefone
     let users: any[] = [];
@@ -59,7 +60,7 @@ router.post("/login", async (req, res) => {
     if (!users.length && telefoneNum.length >= 8) {
       users = (await db.execute(sql`
         SELECT id, nome, email, senha_hash, avatar FROM usuarios
-        WHERE telefone = ${telefoneNum} AND ativo = true
+        WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} AND ativo = true
         LIMIT 1
       `)).rows as any[];
     }
@@ -79,7 +80,7 @@ router.post("/login", async (req, res) => {
       const motoRows = (await db.execute(sql`
         SELECT id, nome, email, telefone, senha_pin
         FROM motoristas_app
-        WHERE telefone = ${telefoneNum} AND ativo = true
+        WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} AND ativo = true
         LIMIT 1
       `)).rows as any[];
       if (motoRows.length && String(motoRows[0].senha_pin) === String(senha)) {
@@ -87,7 +88,7 @@ router.post("/login", async (req, res) => {
         const emailShadow = (moto.email || `mot${moto.id}@motorista.gotaxi`).toLowerCase();
         const existing = (await db.execute(sql`
           SELECT id, nome, email, senha_hash, avatar FROM usuarios
-          WHERE LOWER(email) = ${emailShadow} OR telefone = ${moto.telefone}
+          WHERE LOWER(email) = ${emailShadow} OR ${telefoneNormalizadoSql("telefone")} = ${normalizarTelefone(moto.telefone)}
           LIMIT 1
         `)).rows as any[];
         if (existing.length) {
@@ -95,7 +96,7 @@ router.post("/login", async (req, res) => {
         } else {
           const ins = (await db.execute(sql`
             INSERT INTO usuarios (nome, email, senha_hash, telefone, empresa_id, papel, ativo)
-            VALUES (${moto.nome}, ${emailShadow}, ${String(moto.senha_pin)}, ${moto.telefone}, 1, 'cliente', true)
+            VALUES (${moto.nome}, ${emailShadow}, ${String(moto.senha_pin)}, ${normalizarTelefone(moto.telefone)}, 1, 'cliente', true)
             RETURNING id, nome, email, senha_hash, avatar
           `)).rows as any[];
           user = ins[0];
@@ -582,7 +583,7 @@ router.post("/cadastrar-indicado", async (req, res) => {
     if (!codigo || !categoria || !nome || !whatsapp || !senha) {
       return res.status(400).json({ error: "Dados obrigatórios ausentes" });
     }
-    const telefoneNum = String(whatsapp).replace(/\D/g, "");
+    const telefoneNum = normalizarTelefone(whatsapp);
     if (telefoneNum.length < 8) return res.status(400).json({ error: "WhatsApp inválido" });
     if (String(senha).length < 4) return res.status(400).json({ error: "Senha deve ter ao menos 4 caracteres" });
 
@@ -630,12 +631,12 @@ router.post("/cadastrar-indicado", async (req, res) => {
           const m = mRows[0];
           const emailShadow = (m.email || `mot${m.id}@motorista.gotaxi`).toLowerCase();
           let shadow = (await db.execute(sql`
-            SELECT id, nome FROM usuarios WHERE LOWER(email) = ${emailShadow} OR telefone = ${m.telefone} LIMIT 1
+            SELECT id, nome FROM usuarios WHERE LOWER(email) = ${emailShadow} OR ${telefoneNormalizadoSql("telefone")} = ${normalizarTelefone(m.telefone)} LIMIT 1
           `)).rows as any[];
           if (!shadow.length) {
             shadow = (await db.execute(sql`
               INSERT INTO usuarios (nome, email, senha_hash, telefone, empresa_id, papel, ativo)
-              VALUES (${m.nome}, ${emailShadow}, ${String(m.senha_pin)}, ${m.telefone}, 1, 'cliente', true)
+              VALUES (${m.nome}, ${emailShadow}, ${String(m.senha_pin)}, ${normalizarTelefone(m.telefone)}, 1, 'cliente', true)
               RETURNING id, nome
             `)).rows as any[];
           }
@@ -661,7 +662,7 @@ router.post("/cadastrar-indicado", async (req, res) => {
     if (categoria === "cliente") {
       // Evita duplicidade
       const existe = (await db.execute(sql`
-        SELECT id FROM usuarios WHERE telefone = ${telefoneNum} LIMIT 1
+        SELECT id FROM usuarios WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} LIMIT 1
       `)).rows as any[];
       if (existe.length) return res.status(409).json({ error: "Já existe uma conta com este WhatsApp" });
 
@@ -678,7 +679,7 @@ router.post("/cadastrar-indicado", async (req, res) => {
       redirectTo = "app";
     } else if (categoria === "motorista") {
       const existe = (await db.execute(sql`
-        SELECT id FROM motoristas_app WHERE telefone = ${telefoneNum} LIMIT 1
+        SELECT id FROM motoristas_app WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} LIMIT 1
       `)).rows as any[];
       if (existe.length) return res.status(409).json({ error: "Já existe um motorista com este WhatsApp" });
 
@@ -696,7 +697,7 @@ router.post("/cadastrar-indicado", async (req, res) => {
     } else if (categoria === "food") {
       // Boy Delivery (motoristas_app com tipo_profissional='delivery') — aparece em /admin/delivery
       const existe = (await db.execute(sql`
-        SELECT id FROM motoristas_app WHERE telefone = ${telefoneNum} LIMIT 1
+        SELECT id FROM motoristas_app WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} LIMIT 1
       `)).rows as any[];
       if (existe.length) return res.status(409).json({ error: "Já existe um cadastro com este WhatsApp" });
 
@@ -715,7 +716,7 @@ router.post("/cadastrar-indicado", async (req, res) => {
       // Entregador: cria registro em motoristas_app E uma empresa-espelho
       // pra também aparecer em /admin/empresas com o badge "Entregas".
       const existe = (await db.execute(sql`
-        SELECT id FROM motoristas_app WHERE telefone = ${telefoneNum} LIMIT 1
+        SELECT id FROM motoristas_app WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} LIMIT 1
       `)).rows as any[];
       if (existe.length) return res.status(409).json({ error: "Já existe um entregador com este WhatsApp" });
 
@@ -789,6 +790,9 @@ router.post("/cadastrar-indicado", async (req, res) => {
 
     return res.json({ ok: true, redirect_to: redirectTo, login: contaLogin, afiliado_nome: afiliadoNome });
   } catch (err: any) {
+    if (err?.cause?.code === "23505" || err?.code === "23505") {
+      return res.status(409).json({ error: "Já existe uma conta com este WhatsApp" });
+    }
     console.error("afiliados/cadastrar-indicado err:", err);
     return res.status(500).json({ error: "server_error", message: err?.message ?? "erro" });
   }
