@@ -5,6 +5,163 @@
  * SaaS Multi-Empresas API
  * OpenAPI spec version: 0.1.0
  */
+export interface PaymentOptions {
+  empresaId?: number;
+  mercadoPago?: boolean;
+  directPayment?: boolean;
+  wallet?: boolean;
+  beta?: boolean;
+  sandbox?: boolean;
+}
+
+export interface PartnerPaymentOptionsInput {
+  mercadoPagoEnabled: boolean;
+  directPaymentEnabled: boolean;
+}
+
+export interface AdminPartnerPaymentConfigInput {
+  mercadoPagoEnabled?: boolean;
+  directPaymentEnabled?: boolean;
+}
+
+export interface GlobalMercadoPagoConfigInput {
+  publicKey: string;
+  accessToken?: string;
+  enabled: boolean;
+}
+
+export interface PaymentFeesInput {
+  /** Percentage in basis points */
+  pix: number;
+  /** Percentage in basis points */
+  card: number;
+  /** Percentage in basis points */
+  wallet: number;
+}
+
+export interface WalletTopupInput {
+  /** @minimum 100 */
+  amountCents: number;
+}
+
+export interface SavedCardConfig {
+  publicKey: string;
+  sandbox: boolean;
+}
+
+export interface SavedCard {
+  cardId: string;
+  /** @pattern ^\d{4}$ */
+  lastFour: string;
+  paymentMethod: string;
+  brand: string;
+  /**
+   * @minimum 1
+   * @maximum 12
+   */
+  expirationMonth: number;
+  expirationYear: number;
+}
+
+export interface SavedCardResponse {
+  card: SavedCard | null;
+}
+
+export interface SavedCardInput {
+  /**
+   * Opaque one-use token created by the official Mercado Pago SDK.
+   * @minLength 8
+   */
+  cardToken: string;
+}
+
+/**
+ * carteira is accepted as a legacy input alias and normalized to wallet
+ */
+export type CheckoutInputPaymentSource =
+  (typeof CheckoutInputPaymentSource)[keyof typeof CheckoutInputPaymentSource];
+
+export const CheckoutInputPaymentSource = {
+  mercado_pago: "mercado_pago",
+  wallet: "wallet",
+  carteira: "carteira",
+} as const;
+
+export type CheckoutInputMercadoPagoMethod =
+  (typeof CheckoutInputMercadoPagoMethod)[keyof typeof CheckoutInputMercadoPagoMethod];
+
+export const CheckoutInputMercadoPagoMethod = {
+  pix: "pix",
+  card: "card",
+  wallet: "wallet",
+} as const;
+
+export interface CheckoutInput {
+  module: string;
+  referenceId: string;
+  /** carteira is accepted as a legacy input alias and normalized to wallet */
+  paymentSource: CheckoutInputPaymentSource;
+  mercadoPagoMethod: CheckoutInputMercadoPagoMethod;
+  payerEmail?: string;
+  /**
+   * One-use token created client-side by the Mercado Pago SDK from the authenticated customer's saved card and CVV. Required when mercadoPagoMethod is card; never stored after payment creation.
+   * @minLength 8
+   * @maxLength 512
+   */
+  paymentToken?: string;
+}
+
+export type ServicePaymentStatusModule =
+  (typeof ServicePaymentStatusModule)[keyof typeof ServicePaymentStatusModule];
+
+export const ServicePaymentStatusModule = {
+  motorista: "motorista",
+  entrega: "entrega",
+} as const;
+
+export type ServicePaymentStatusPaymentSource =
+  (typeof ServicePaymentStatusPaymentSource)[keyof typeof ServicePaymentStatusPaymentSource];
+
+export const ServicePaymentStatusPaymentSource = {
+  direto: "direto",
+  mercado_pago: "mercado_pago",
+  wallet: "wallet",
+} as const;
+
+export type ServicePaymentStatusPaymentStatus =
+  (typeof ServicePaymentStatusPaymentStatus)[keyof typeof ServicePaymentStatusPaymentStatus];
+
+export const ServicePaymentStatusPaymentStatus = {
+  direto: "direto",
+  pendente: "pendente",
+  pago: "pago",
+  rejeitado: "rejeitado",
+} as const;
+
+/**
+ * @nullable
+ */
+export type ServicePaymentStatusPix = {
+  /** @nullable */
+  qrCode?: string | null;
+  /** @nullable */
+  qrCodeBase64?: string | null;
+  /** @nullable */
+  ticketUrl?: string | null;
+} | null;
+
+export interface ServicePaymentStatus {
+  module: ServicePaymentStatusModule;
+  referenceId: number;
+  paymentSource: ServicePaymentStatusPaymentSource;
+  paymentStatus: ServicePaymentStatusPaymentStatus;
+  status: string;
+  /** @nullable */
+  method: string | null;
+  /** @nullable */
+  pix: ServicePaymentStatusPix;
+}
+
 export interface HealthStatus {
   status: string;
 }
@@ -108,8 +265,27 @@ export const CorridaStatus = {
   aguardando: "aguardando",
   aceita: "aceita",
   em_andamento: "em_andamento",
+  finalizando_pagamento: "finalizando_pagamento",
   concluida: "concluida",
   cancelada: "cancelada",
+} as const;
+
+export type CorridaPaymentSource =
+  (typeof CorridaPaymentSource)[keyof typeof CorridaPaymentSource];
+
+export const CorridaPaymentSource = {
+  direto: "direto",
+  mercado_pago: "mercado_pago",
+  wallet: "wallet",
+} as const;
+
+export type CorridaPaymentStatus =
+  (typeof CorridaPaymentStatus)[keyof typeof CorridaPaymentStatus];
+
+export const CorridaPaymentStatus = {
+  direto: "direto",
+  pendente: "pendente",
+  pago: "pago",
 } as const;
 
 export interface Corrida {
@@ -121,6 +297,8 @@ export interface Corrida {
   valor: number;
   distanciaKm?: number | null;
   motoristaNome?: string | null;
+  paymentSource?: CorridaPaymentSource;
+  paymentStatus?: CorridaPaymentStatus;
   criadoEm: string;
 }
 
@@ -267,9 +445,28 @@ export const EntregaStatus = {
   aguardando: "aguardando",
   coletado: "coletado",
   em_transito: "em_transito",
+  finalizando_pagamento: "finalizando_pagamento",
   entregue: "entregue",
   devolvido: "devolvido",
   cancelado: "cancelado",
+} as const;
+
+export type EntregaPaymentSource =
+  (typeof EntregaPaymentSource)[keyof typeof EntregaPaymentSource];
+
+export const EntregaPaymentSource = {
+  direto: "direto",
+  mercado_pago: "mercado_pago",
+  wallet: "wallet",
+} as const;
+
+export type EntregaPaymentStatus =
+  (typeof EntregaPaymentStatus)[keyof typeof EntregaPaymentStatus];
+
+export const EntregaPaymentStatus = {
+  direto: "direto",
+  pendente: "pendente",
+  pago: "pago",
 } as const;
 
 export interface Entrega {
@@ -282,8 +479,19 @@ export interface Entrega {
   status: EntregaStatus;
   entregadorNome?: string | null;
   valor: number;
+  paymentSource?: EntregaPaymentSource;
+  paymentStatus?: EntregaPaymentStatus;
   criadoEm: string;
 }
+
+export type CreateEntregaRequestPaymentSource =
+  (typeof CreateEntregaRequestPaymentSource)[keyof typeof CreateEntregaRequestPaymentSource];
+
+export const CreateEntregaRequestPaymentSource = {
+  direto: "direto",
+  mercado_pago: "mercado_pago",
+  wallet: "wallet",
+} as const;
 
 export interface CreateEntregaRequest {
   remetenteNome: string;
@@ -294,6 +502,47 @@ export interface CreateEntregaRequest {
   enderecoEntrega: string;
   descricaoPacote?: string;
   valor: number;
+  paymentSource?: CreateEntregaRequestPaymentSource;
+}
+
+export type PublicDeliveryInputCategoria =
+  (typeof PublicDeliveryInputCategoria)[keyof typeof PublicDeliveryInputCategoria];
+
+export const PublicDeliveryInputCategoria = {
+  padrao: "padrao",
+  expressa: "expressa",
+  grande: "grande",
+} as const;
+
+export type PublicDeliveryInputPaymentSource =
+  (typeof PublicDeliveryInputPaymentSource)[keyof typeof PublicDeliveryInputPaymentSource];
+
+export const PublicDeliveryInputPaymentSource = {
+  direto: "direto",
+  mercado_pago: "mercado_pago",
+  wallet: "wallet",
+  carteira: "carteira",
+} as const;
+
+export interface PublicDeliveryInput {
+  empresa_id: number;
+  remetente_nome: string;
+  remetente_telefone?: string;
+  destinatario_nome?: string;
+  destinatario_telefone?: string;
+  endereco_coleta: string;
+  endereco_entrega: string;
+  descricao_pacote?: string;
+  categoria?: PublicDeliveryInputCategoria;
+  distancia_km?: number;
+  coleta_lat?: number;
+  coleta_lng?: number;
+  entrega_lat?: number;
+  entrega_lng?: number;
+  forma_pagamento?: string;
+  payment_source: PublicDeliveryInputPaymentSource;
+  /** Estimativa do cliente; o servidor recalcula o valor autoritativo */
+  valor?: number;
 }
 
 export interface Restaurante {

@@ -297,6 +297,17 @@ function CadastroRapidoDialog({
 }
 
 // ── Main PDV component ───────────────────────────────────────────────────────
+type PdvMpPayment = {
+  transactionId: number;
+  pedidoId: number;
+  method: "pix" | "link";
+  status: string;
+  paymentStatus: "pendente" | "pago" | "rejeitado";
+  amountCents: number;
+  pix: { qrCode: string | null; qrCodeBase64: string | null; ticketUrl: string | null } | null;
+  paymentUrl: string | null;
+};
+
 export default function Pdv() {
   const { activeModule } = useAppStore();
   const { token, user, empresa } = useAuth();
@@ -447,10 +458,108 @@ export default function Pdv() {
     if (c.clienteEndereco) setClienteEndereco(c.clienteEndereco);
   };
 
-  const [mpUnavailableMessage, setMpUnavailableMessage] = useState(false);
+  const [mpCharge, setMpCharge] = useState<{ pedidoId: number; whatsapp?: string; payment: PdvMpPayment | null } | null>(null);
+  const [mpError, setMpError] = useState("");
+  const [mpCopied, setMpCopied] = useState<"pix" | "link" | null>(null);
 
-  const confirmFinalizarMercadoPago = () => {
-    setMpUnavailableMessage(true);
+  const mpHeaders = useCallback(() => ({
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "x-empresa-id": String(user?.empresaId ?? ""),
+  }), [token, user?.empresaId]);
+
+  const requestMpCharge = async (pedidoId: number, whatsapp: string | undefined, method: "pix" | "link") => {
+    setMpError("");
+    const r = await fetch(`/api/payments/pdv/pedidos/${pedidoId}/charge`, {
+      method: "POST",
+      headers: mpHeaders(),
+      body: JSON.stringify({ method }),
+    }).catch(() => null);
+    const data = r ? await r.json().catch(() => ({})) : {};
+    if (!r || !r.ok) {
+      setMpCharge({ pedidoId, whatsapp, payment: null });
+      setMpError(data?.message || "Não foi possível gerar a cobrança no Mercado Pago. Tente novamente.");
+      return;
+    }
+    setMpCharge({ pedidoId, whatsapp, payment: data as PdvMpPayment });
+  };
+
+  const confirmFinalizarMercadoPago = async (method: "pix" | "link") => {
+    setIsSubmitting(true);
+    if (mpCharge) {
+      await requestMpCharge(mpCharge.pedidoId, mpCharge.whatsapp, method);
+      setIsSubmitting(false);
+      return;
+    }
+    const nome = cliente?.clienteNome || "Cliente";
+    const whatsapp = cliente?.clienteWhatsapp || telefone.replace(/\D/g, "");
+    const end = clienteEndereco || cliente?.clienteEndereco;
+    const novo = await createOrder({
+      modulo: isEcommerce ? "ecommerce" : "food",
+      tipo: activeTab,
+      clienteNome: nome,
+      clienteWhatsapp: whatsapp || undefined,
+      clienteEndereco: end || undefined,
+      total: cartTotal,
+      taxa_entrega: taxaFrete || undefined,
+      distancia_km: frete.distancia || undefined,
+      forma_pagamento: "mercado_pago",
+      formaPagamento: "mercado_pago",
+      itens: cart.map(item => ({ nome: item.name, quantidade: item.qty, preco: item.price })),
+    } as any);
+    if (!novo) {
+      setMpError("Não foi possível criar o pedido. Tente novamente.");
+      setIsSubmitting(false);
+      return;
+    }
+    setCart([]);
+    clearTel();
+    setClienteEndereco("");
+    await requestMpCharge(novo.id, whatsapp || undefined, method);
+    setIsSubmitting(false);
+  };
+
+  const closePagamento = () => {
+    setShowPagamento(false);
+    setSelectedReceivingSource(null);
+    setMpCharge(null);
+    setMpError("");
+  };
+
+  useEffect(() => {
+    const pedidoId = mpCharge?.pedidoId;
+    if (!pedidoId || mpCharge?.payment?.paymentStatus !== "pendente") return;
+    const timer = setInterval(async () => {
+      const r = await fetch(`/api/payments/pdv/pedidos/${pedidoId}/payment`, { headers: mpHeaders() }).catch(() => null);
+      if (!r?.ok) return;
+      const payment = await r.json().catch(() => null) as PdvMpPayment | null;
+      if (!payment) return;
+      setMpCharge(prev => prev && prev.pedidoId === pedidoId ? { ...prev, payment } : prev);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [mpCharge?.pedidoId, mpCharge?.payment?.paymentStatus, mpHeaders]);
+
+  useEffect(() => {
+    if (mpCharge?.payment?.paymentStatus !== "pago") return;
+    setPedidoCriado({ id: mpCharge.pedidoId, whatsapp: mpCharge.whatsapp });
+    closePagamento();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mpCharge?.payment?.paymentStatus]);
+
+  const copyMp = (kind: "pix" | "link", value: string) => {
+    navigator.clipboard?.writeText(value);
+    setMpCopied(kind);
+    setTimeout(() => setMpCopied(null), 2500);
+  };
+
+  const sendMpWhatsApp = (value: string, kind: "pix" | "link") => {
+    if (!mpCharge) return;
+    const intro = kind === "pix" ? "Pix copia e cola" : "Link de pagamento";
+    const msg = encodeURIComponent(
+      `Olá! Para pagar o pedido *#${mpCharge.pedidoId}* em *${empresa?.nome ?? "GoTaxi PDV"}* (R$ ${((mpCharge.payment?.amountCents ?? 0) / 100).toFixed(2)}), use o ${intro} abaixo:\n\n${value}`
+    );
+    const tel = mpCharge.whatsapp?.replace(/\D/g, "");
+    window.open(`https://wa.me/${tel ? `55${tel}` : ""}?text=${msg}`, "_blank");
   };
 
   const trackingUrl = pedidoCriado
@@ -477,7 +586,7 @@ export default function Pdv() {
     <>
       {/* Payment selection modal */}
       {showPagamento && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => !isSubmitting && setShowPagamento(false)}>
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => !isSubmitting && closePagamento()}>
           <div className="bg-card border border-border rounded-2xl w-full max-w-md shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="p-5 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -486,16 +595,10 @@ export default function Pdv() {
                 </div>
                 <div>
                   <h2 className="text-base font-bold text-foreground">Receber pagamento</h2>
-                  <p className="text-xs text-muted-foreground">Total: <strong className="text-foreground">R$ {cartTotal.toFixed(2)}</strong></p>
+                  <p className="text-xs text-muted-foreground">Total: <strong className="text-foreground">R$ {mpCharge?.payment ? (mpCharge.payment.amountCents / 100).toFixed(2) : cartTotal.toFixed(2)}</strong></p>
                 </div>
               </div>
-              <button onClick={() => {
-                if (!isSubmitting) {
-                  setShowPagamento(false);
-                  setMpUnavailableMessage(false);
-                  setSelectedReceivingSource(null);
-                }
-              }} className="text-muted-foreground hover:text-foreground" disabled={isSubmitting}>
+              <button onClick={() => { if (!isSubmitting) closePagamento(); }} className="text-muted-foreground hover:text-foreground" disabled={isSubmitting}>
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -515,7 +618,7 @@ export default function Pdv() {
                         </div>
                         <div className="flex-1">
                           <span className="block text-sm font-bold text-foreground">Mercado Pago</span>
-                          <span className="block text-xs text-muted-foreground mt-0.5">Link de pagamento online</span>
+                          <span className="block text-xs text-muted-foreground mt-0.5">QR Code Pix ou link de pagamento</span>
                         </div>
                         {paymentOptions.beta && (
                           <span className="absolute top-0 right-0 bg-[#009EE3] text-white text-[9px] font-bold px-2 py-0.5 rounded-bl-lg uppercase">BETA</span>
@@ -547,28 +650,71 @@ export default function Pdv() {
                 </>
               ) : selectedReceivingSource === "mercadopago" ? (
                 <div className="space-y-4">
-                  <div className="flex items-center gap-2 text-sm text-[#009EE3] font-bold bg-[#009EE3]/10 px-3 py-2 rounded-lg cursor-pointer hover:bg-[#009EE3]/20" onClick={() => { setMpUnavailableMessage(false); setSelectedReceivingSource(null); }}>
-                    ← Voltar
-                  </div>
+                  {!mpCharge && (
+                    <div className="flex items-center gap-2 text-sm text-[#009EE3] font-bold bg-[#009EE3]/10 px-3 py-2 rounded-lg cursor-pointer hover:bg-[#009EE3]/20" onClick={() => { setMpError(""); setSelectedReceivingSource(null); }}>
+                      ← Voltar
+                    </div>
+                  )}
 
-                  {!mpUnavailableMessage ? (
+                  {mpError && (
+                    <p className="text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-lg p-3">{mpError}</p>
+                  )}
+
+                  {mpCharge?.payment?.paymentStatus === "pendente" ? (
                     <div className="space-y-4">
-                      <p className="text-sm text-muted-foreground">O cliente pagará via Mercado Pago (cartão, Pix ou carteira MP). O valor será processado online e creditado na sua conta Mercado Pago após dedução de taxas.</p>
-                      
-                      <button
-                        onClick={confirmFinalizarMercadoPago}
-                        className="w-full flex items-center justify-center gap-2 p-3 rounded-xl bg-[#009EE3] hover:bg-[#009EE3]/90 text-white font-bold transition-colors"
-                      >
-                        Gerar Link de Pagamento
-                      </button>
+                      <div className="flex items-center justify-center gap-2 text-sm font-semibold text-[#009EE3]">
+                        <Loader2 className="w-4 h-4 animate-spin" /> Aguardando pagamento do pedido #{mpCharge.pedidoId}
+                      </div>
+                      {mpCharge.payment.pix ? (
+                        <div className="space-y-3">
+                          {mpCharge.payment.pix.qrCodeBase64 && (
+                            <img src={`data:image/png;base64,${mpCharge.payment.pix.qrCodeBase64}`} alt="QR Code Pix" className="w-52 h-52 mx-auto rounded-lg border border-border bg-white p-2" />
+                          )}
+                          {mpCharge.payment.pix.qrCode && (
+                            <div className="bg-secondary/50 border border-border rounded-xl p-3">
+                              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5">Pix copia e cola</p>
+                              <p className="text-[11px] text-foreground font-mono break-all line-clamp-3">{mpCharge.payment.pix.qrCode}</p>
+                              <div className="flex gap-2 mt-2">
+                                <Button size="sm" variant="outline" className="flex-1" onClick={() => copyMp("pix", mpCharge.payment!.pix!.qrCode!)}>{mpCopied === "pix" ? "Copiado ✓" : "Copiar"}</Button>
+                                <Button size="sm" className="flex-1 bg-[#25D366] hover:bg-[#22c55e] text-white" onClick={() => sendMpWhatsApp(mpCharge.payment!.pix!.qrCode!, "pix")}>WhatsApp</Button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : mpCharge.payment.paymentUrl ? (
+                        <div className="bg-secondary/50 border border-border rounded-xl p-3">
+                          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5">Link de pagamento</p>
+                          <p className="text-xs text-foreground font-mono break-all">{mpCharge.payment.paymentUrl}</p>
+                          <div className="flex gap-2 mt-2">
+                            <Button size="sm" variant="outline" className="flex-1" onClick={() => copyMp("link", mpCharge.payment!.paymentUrl!)}>{mpCopied === "link" ? "Copiado ✓" : "Copiar"}</Button>
+                            <Button size="sm" variant="outline" className="flex-1" onClick={() => window.open(mpCharge.payment!.paymentUrl!, "_blank")}>Abrir</Button>
+                            <Button size="sm" className="flex-1 bg-[#25D366] hover:bg-[#22c55e] text-white" onClick={() => sendMpWhatsApp(mpCharge.payment!.paymentUrl!, "link")}>WhatsApp</Button>
+                          </div>
+                        </div>
+                      ) : null}
+                      <p className="text-[11px] text-muted-foreground text-center">A tela atualiza sozinha quando o pagamento for aprovado. Você pode fechar esta janela; o pedido continua com pagamento pendente.</p>
                     </div>
                   ) : (
-                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center space-y-3">
-                      <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto">
-                        <svg className="w-6 h-6 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 16v-4"/><path d="M12 8h.01"/><path d="M22 12A10 10 0 1 1 2 12a10 10 0 0 1 20 0z"/></svg>
-                      </div>
-                      <p className="text-sm text-blue-900 font-medium">Recurso em Desenvolvimento</p>
-                      <p className="text-xs text-blue-700">A geração de links do Mercado Pago direto pelo PDV Web presencial ainda está em desenvolvimento na versão Beta. Para usar Mercado Pago hoje, o cliente deve fazer o pedido pelo aplicativo.</p>
+                    <div className="space-y-3">
+                      <p className="text-sm text-muted-foreground">
+                        {mpCharge?.payment?.paymentStatus === "rejeitado"
+                          ? `O pagamento do pedido #${mpCharge.pedidoId} não foi aprovado. Gere uma nova cobrança.`
+                          : "O valor cai na conta Mercado Pago da sua empresa, já descontada a taxa do marketplace GoTaxi."}
+                      </p>
+                      <button
+                        disabled={isSubmitting}
+                        onClick={() => confirmFinalizarMercadoPago("pix")}
+                        className="w-full flex items-center justify-center gap-2 p-3 rounded-xl bg-[#009EE3] hover:bg-[#009EE3]/90 text-white font-bold transition-colors disabled:opacity-50"
+                      >
+                        {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />} Gerar QR Code Pix
+                      </button>
+                      <button
+                        disabled={isSubmitting}
+                        onClick={() => confirmFinalizarMercadoPago("link")}
+                        className="w-full flex items-center justify-center gap-2 p-3 rounded-xl border border-[#009EE3] text-[#009EE3] hover:bg-[#009EE3]/5 font-bold transition-colors disabled:opacity-50"
+                      >
+                        <CreditCard className="w-4 h-4" /> Gerar link de pagamento (cartão)
+                      </button>
                     </div>
                   )}
                 </div>

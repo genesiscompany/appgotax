@@ -122,6 +122,9 @@ export default function Configuracoes() {
     beta: false,
     environment: "sandbox",
   });
+  const [mpConnection, setMpConnection] = useState<{ connected: boolean; status: string; oauthConfigured: boolean; commissionPercent: number } | null>(null);
+  const [mpConnecting, setMpConnecting] = useState(false);
+  const [mpConnectionError, setMpConnectionError] = useState("");
   const [savingMp, setSavingMp] = useState(false);
   const [savedMp, setSavedMp] = useState(false);
   const [mpError, setMpError] = useState("");
@@ -355,6 +358,56 @@ export default function Configuracoes() {
       setPagError("Falha de conexão. Tente novamente.");
     }
     setSavingPag(false);
+  };
+
+  const loadMpConnection = async () => {
+    const r = await fetch("/api/payments/pdv/mercado-pago/status", { headers }).catch(() => null);
+    if (r?.ok) setMpConnection(await r.json());
+  };
+
+  useEffect(() => {
+    loadMpConnection();
+    const onFocus = () => { loadMpConnection(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  const handleConnectMp = async () => {
+    setMpConnecting(true); setMpConnectionError("");
+    const popup = window.open("", "_blank");
+    try {
+      const r = await fetch("/api/payments/pdv/mercado-pago/connect", { method: "POST", headers });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.authorizeUrl) {
+        popup?.close();
+        setMpConnectionError(data.error === "mercado_pago_oauth_not_configured"
+          ? "A conexão Mercado Pago ainda não foi configurada pela GoTaxi."
+          : "Não foi possível iniciar a conexão com o Mercado Pago.");
+      } else if (popup) {
+        popup.location.href = data.authorizeUrl;
+      } else {
+        window.location.href = data.authorizeUrl;
+      }
+    } catch {
+      popup?.close();
+      setMpConnectionError("Falha de conexão. Tente novamente.");
+    }
+    setMpConnecting(false);
+  };
+
+  const handleDisconnectMp = async () => {
+    if (!window.confirm("Desconectar a conta Mercado Pago da empresa? O PDV deixará de gerar cobranças Mercado Pago.")) return;
+    setMpConnecting(true); setMpConnectionError("");
+    try {
+      const r = await fetch("/api/payments/pdv/mercado-pago/disconnect", { method: "POST", headers });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) setMpConnectionError(data.message || "Não foi possível desconectar.");
+      await loadMpConnection();
+    } catch {
+      setMpConnectionError("Falha de conexão. Tente novamente.");
+    }
+    setMpConnecting(false);
   };
 
   const handleSaveMp = async () => {
@@ -1007,6 +1060,36 @@ export default function Configuracoes() {
               <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-100 text-amber-700 text-xs font-semibold shrink-0">
                 <AlertCircle className="w-4 h-4" /> Inativa
               </div>
+            )}
+          </div>
+
+          <div className="bg-muted/10 border border-border/50 rounded-xl p-5 space-y-3">
+            <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
+              <div className="space-y-1">
+                <p className="font-semibold text-sm text-foreground">Conta Mercado Pago da empresa (vendas no PDV)</p>
+                <p className="text-sm text-muted-foreground max-w-lg">
+                  {mpConnection?.connected
+                    ? "Conectada. As vendas Mercado Pago do PDV caem direto na sua conta."
+                    : "Conecte a conta Mercado Pago da empresa para receber Pix e cartão pelo PDV."}
+                  {" "}A GoTaxi retém {mpConnection ? `${mpConnection.commissionPercent}%` : "a taxa do marketplace"} de cada venda (taxa definida pelo Super Admin).
+                </p>
+              </div>
+              {mpConnection?.connected ? (
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-green-100 text-green-700 text-xs font-semibold"><CheckCircle2 className="w-4 h-4" /> Conectada</span>
+                  <Button variant="outline" size="sm" onClick={handleDisconnectMp} disabled={mpConnecting}>Desconectar</Button>
+                </div>
+              ) : (
+                <Button onClick={handleConnectMp} disabled={mpConnecting || mpConnection?.oauthConfigured === false} className="shrink-0 bg-[#009EE3] hover:bg-[#009EE3]/90 text-white">
+                  {mpConnecting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wallet className="w-4 h-4 mr-2" />}Conectar Mercado Pago
+                </Button>
+              )}
+            </div>
+            {mpConnection && !mpConnection.connected && mpConnection.status === "invalid" && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">A conexão expirou ou foi revogada no Mercado Pago. Conecte novamente.</p>
+            )}
+            {mpConnectionError && (
+              <p className="text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">{mpConnectionError}</p>
             )}
           </div>
 

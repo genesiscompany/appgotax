@@ -12,6 +12,7 @@ export const EntregaStatus = {
   aguardando: "aguardando",
   coletado: "coletado",
   em_transito: "em_transito",
+  finalizando_pagamento: "finalizando_pagamento",
   entregue: "entregue",
   devolvido: "devolvido",
   cancelado: "cancelado",

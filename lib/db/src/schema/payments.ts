@@ -59,6 +59,35 @@ export const motoristaMercadoPagoOauthStatesTable = pgTable("motorista_mercado_p
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/** OAuth credentials for an empresa selling through the PDV. Values are AES-GCM encrypted. */
+export const empresaMercadoPagoConnectionsTable = pgTable("empresa_mercado_pago_connections", {
+  id: serial("id").primaryKey(),
+  empresaId: integer("empresa_id").notNull().unique(),
+  mercadoPagoUserId: text("mercado_pago_user_id"),
+  encryptedAccessToken: text("encrypted_access_token"),
+  encryptedRefreshToken: text("encrypted_refresh_token"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  scopes: text("scopes"),
+  status: text("status").notNull().default("pending"),
+  oauthEnvironment: text("oauth_environment").notNull().default("production"),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  invalidatedAt: timestamp("invalidated_at", { withTimezone: true }),
+  lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
+  lastErrorCode: text("last_error_code"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const empresaMercadoPagoOauthStatesTable = pgTable("empresa_mercado_pago_oauth_states", {
+  id: serial("id").primaryKey(),
+  empresaId: integer("empresa_id").notNull(),
+  nonce: text("nonce").notNull().unique(),
+  oauthEnvironment: text("oauth_environment").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const paymentTransactionsTable = pgTable("payment_transactions", {
   id: serial("id").primaryKey(),
   empresaId: integer("empresa_id"),

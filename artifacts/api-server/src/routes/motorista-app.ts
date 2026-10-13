@@ -9,7 +9,7 @@ import { uploadImageToGCS } from "../lib/uploadImage";
 import { finalizeServicePayment, settleServiceEarning } from "./payments";
 import { issueMotoristaToken, motoristaIdFromRequest } from "../lib/motoristaToken";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { encryptToken } from "./payments";
+import { encryptToken, handleEmpresaOauthCallback, isEmpresaOauthState } from "./payments";
 import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
 import { gerarComissaoCliente } from "../lib/comissaoAfiliado";
 
@@ -333,6 +333,7 @@ router.post("/mercado-pago/disconnect", async (req, res) => {
 router.get("/mercado-pago/callback", async (req, res) => {
   const code = typeof req.query.code === "string" ? req.query.code : "";
   const state = typeof req.query.state === "string" ? req.query.state : "";
+  if (isEmpresaOauthState(state)) { await handleEmpresaOauthCallback(req, res); return; }
   const parsed = state ? parseOauthState(state) : null;
   if (!code || !parsed) { res.status(400).send("Conexão Mercado Pago inválida ou expirada."); return; }
   try {
