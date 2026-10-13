@@ -6,14 +6,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-/**
- * carteira is accepted as a legacy input alias and normalized to wallet
- */
 export type CheckoutInputPaymentSource =
   (typeof CheckoutInputPaymentSource)[keyof typeof CheckoutInputPaymentSource];
 
 export const CheckoutInputPaymentSource = {
   mercado_pago: "mercado_pago",
   wallet: "wallet",
-  carteira: "carteira",
 } as const;
