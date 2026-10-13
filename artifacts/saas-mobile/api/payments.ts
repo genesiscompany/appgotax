@@ -9,6 +9,8 @@ export type PaymentOptions = {
 export type WalletData = {
   balanceCents: number;
   currency: string;
+  /** null when the customer has no affiliate profile. */
+  affiliateBalanceCents: number | null;
 };
 
 export type WalletLedgerItem = {
@@ -113,7 +115,26 @@ export async function getWallet(token: string): Promise<WalletData> {
   });
   if (!res.ok) throw new Error("Failed to fetch wallet");
   const data = await res.json();
-  return { balanceCents: Number(data.balanceCents ?? 0), currency: "BRL" };
+  return {
+    balanceCents: Number(data.balanceCents ?? 0),
+    currency: "BRL",
+    affiliateBalanceCents: data.affiliateBalanceCents == null ? null : Number(data.affiliateBalanceCents),
+  };
+}
+
+export async function transferAffiliateBalance(
+  token: string,
+  amountCents: number,
+  idempotencyKey: string,
+): Promise<{ balanceCents: number; affiliateBalanceCents: number }> {
+  const res = await fetch(`${getApiBase()}/payments/wallet/affiliate-transfer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ amountCents, idempotencyKey }),
+  });
+  if (!res.ok) throw await paymentApiError(res, "Não foi possível transferir o saldo de afiliado.");
+  const data = await res.json();
+  return { balanceCents: Number(data.balanceCents ?? 0), affiliateBalanceCents: Number(data.affiliateBalanceCents ?? 0) };
 }
 
 export async function getWalletLedger(token: string): Promise<WalletLedgerItem[]> {

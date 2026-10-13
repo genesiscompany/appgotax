@@ -12,6 +12,7 @@ export const CorridaStatus = {
   aguardando: "aguardando",
   aceita: "aceita",
   em_andamento: "em_andamento",
+  finalizando_pagamento: "finalizando_pagamento",
   concluida: "concluida",
   cancelada: "cancelada",
 } as const;
