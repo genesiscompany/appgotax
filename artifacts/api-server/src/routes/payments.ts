@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { creditWallet } from "../lib/wallet";
 import { customerIdFromRequest } from "../lib/customerToken";
+import { broadcastToEmpresa } from "./pdv";
 
 const router: IRouter = Router();
 const BETA = { beta: true };
@@ -984,6 +985,14 @@ router.post("/webhook/mercado-pago", async (req, res) => {
       WHERE provider_payment_id = ${isOrderEvent ? null : providerObjectId}
          OR provider_order_id = ${isOrderEvent ? providerObjectId : null} LIMIT 1`);
     let knownTransaction = known.rows[0] as any;
+    // PDV payment links: the payment ID only exists after the customer pays. The
+    // hint only selects which seller token to query; amount and reference are verified below.
+    const pdvTransactionHint = Number(req.query.pdv_tx);
+    if (!knownTransaction && Number.isInteger(pdvTransactionHint) && pdvTransactionHint > 0) {
+      const match = await db.execute(sql`SELECT metadata, module FROM payment_transactions
+        WHERE id = ${pdvTransactionHint} AND module = ${PDV_MODULE} LIMIT 1`);
+      knownTransaction = match.rows[0] as any;
+    }
     // Pix notifications may arrive before the create-payment request persists its provider ID.
     if (!knownTransaction && !isOrderEvent) {
       const provisional = await mp(`/v1/payments/${encodeURIComponent(providerObjectId)}`, await globalAccessToken());
@@ -1002,7 +1011,9 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     const knownSellerId = Number(knownTransaction.metadata?.motoristaId);
     const token = ["motorista", "entrega"].includes(String(knownTransaction.module))
       ? await sellerAccessToken(knownSellerId, String(knownTransaction.metadata?.sellerMercadoPagoUserId || ""))
-      : await globalAccessToken();
+      : knownTransaction.module === PDV_MODULE
+        ? await empresaSellerAccessToken(Number(knownTransaction.metadata?.empresaId), String(knownTransaction.metadata?.sellerMercadoPagoUserId || ""))
+        : await globalAccessToken();
     if (!token) {
       await db.execute(sql`DELETE FROM mercado_pago_webhook_events WHERE provider_event_id = ${eventId}`);
       missingCredentials(res);
@@ -1034,7 +1045,9 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     }
     const rawStatus = isOrderEvent ? automaticPaymentStatus(providerObject) : String(providerObject.status);
     const candidateStatus = rawStatus === "in_process" ? "processing" : rawStatus;
-    const status = ["approved", "pending", "processing", "rejected", "cancelled", "refunded"].includes(candidateStatus) ? candidateStatus : "pending";
+    const knownStatus = ["approved", "pending", "processing", "rejected", "cancelled", "refunded"].includes(candidateStatus) ? candidateStatus : "pending";
+    // A PDV payment link accepts new attempts after a rejected card, so a rejection keeps it open.
+    const status = transaction.module === PDV_MODULE && transaction.method === "link" && knownStatus === "rejected" ? "pending" : knownStatus;
     if (TERMINAL_STATUSES.has(String(transaction.status)) && String(transaction.status) !== status) {
       res.json({ received: true, ignored: "non_monotonic_transition", ...BETA }); return;
     }
@@ -1057,6 +1070,7 @@ router.post("/webhook/mercado-pago", async (req, res) => {
     if ((transaction.module === "motorista" || transaction.module === "entrega") && status === "approved") {
       await settleServiceEarning(transaction.module, String(transaction.reference_id), Number(transaction.id));
     }
+    if (transaction.module === PDV_MODULE) await syncPdvPedidoPayment(Number(transaction.id));
     res.json({ received: true, ...BETA });
   } catch (err) {
     await db.execute(sql`DELETE FROM mercado_pago_webhook_events WHERE provider_event_id = ${eventId}`).catch(() => undefined);
@@ -1073,6 +1087,418 @@ router.get("/partner-transactions", requirePartner, async (req, res) => {
   const rows = await db.execute(sql`SELECT id, module, reference_id, payment_source, method, status, gross_amount_cents, platform_fee_cents, provider_payment_id, created_at FROM payment_transactions WHERE empresa_id = ${(req as any).empresaId} ORDER BY id DESC LIMIT 100`);
   const summary = await db.execute(sql`SELECT COUNT(*)::int AS count, COALESCE(SUM(gross_amount_cents) FILTER (WHERE status = 'approved'), 0)::int AS approved_gross_cents, COALESCE(SUM(platform_fee_cents) FILTER (WHERE status = 'approved'), 0)::int AS platform_fee_cents FROM payment_transactions WHERE empresa_id = ${(req as any).empresaId}`);
   res.json({ summary: summary.rows[0], transactions: rows.rows, ...BETA });
+});
+
+// ── Mercado Pago Marketplace no PDV (empresa como vendedora) ────────────────
+// Same seller model as motoristas: the empresa connects its own Mercado Pago
+// account via OAuth, charges are created with the empresa's token, and the
+// GoTaxi commission (empresas.taxa_app, set in Super Admin) is collected via
+// marketplace_fee. Method fees (payment_fees) are not part of the split.
+const PDV_MODULE = "pdv";
+const EMPRESA_OAUTH_STATE_PREFIX = "empresa";
+const DEFAULT_EMPRESA_COMMISSION_PERCENT = 3;
+
+function sharedOauthCallbackUrl() {
+  // Must match the redirect URI registered in the Mercado Pago application (shared with motoristas).
+  return `${publicApiBaseUrl()}/api/motorista-app/mercado-pago/callback`;
+}
+function empresaOauthEnvironment() { return process.env.MERCADO_PAGO_OAUTH_ENVIRONMENT === "sandbox" ? "sandbox" : "production"; }
+function empresaOauthStateSecret() {
+  if (!process.env.SESSION_SECRET) throw new Error("SESSION_SECRET is required for Mercado Pago OAuth");
+  return process.env.SESSION_SECRET;
+}
+function signEmpresaOauthState(empresaId: number, nonce: string, environment: string, expiresAt: number) {
+  const payload = `${EMPRESA_OAUTH_STATE_PREFIX}.${empresaId}.${nonce}.${environment}.${expiresAt}`;
+  return `${payload}.${createHmac("sha256", empresaOauthStateSecret()).update(payload).digest("base64url")}`;
+}
+export function isEmpresaOauthState(value: string) {
+  return value.startsWith(`${EMPRESA_OAUTH_STATE_PREFIX}.`);
+}
+function parseEmpresaOauthState(value: string) {
+  const parts = value.split(".");
+  if (parts.length !== 6 || parts[0] !== EMPRESA_OAUTH_STATE_PREFIX) return null;
+  const [, id, nonce, environment, expiry, signature] = parts;
+  const payload = `${EMPRESA_OAUTH_STATE_PREFIX}.${id}.${nonce}.${environment}.${expiry}`;
+  const expected = createHmac("sha256", empresaOauthStateSecret()).update(payload).digest("base64url");
+  if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  const empresaId = Number(id), expiresAt = Number(expiry);
+  if (!Number.isInteger(empresaId) || empresaId <= 0 || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now() || !nonce || !["sandbox", "production"].includes(environment)) return null;
+  return { empresaId, nonce, environment, expiresAt };
+}
+
+let empresaMercadoPagoSchemaReady: Promise<void> | null = null;
+function ensureEmpresaMercadoPagoSchema() {
+  empresaMercadoPagoSchemaReady ??= (async () => {
+    await db.execute(sql`CREATE TABLE IF NOT EXISTS empresa_mercado_pago_connections (
+      id SERIAL PRIMARY KEY,
+      empresa_id INTEGER NOT NULL UNIQUE,
+      mercado_pago_user_id TEXT,
+      encrypted_access_token TEXT,
+      encrypted_refresh_token TEXT,
+      expires_at TIMESTAMPTZ,
+      scopes TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      oauth_environment TEXT NOT NULL DEFAULT 'production',
+      revoked_at TIMESTAMPTZ,
+      invalidated_at TIMESTAMPTZ,
+      last_refresh_at TIMESTAMPTZ,
+      last_error_code TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await db.execute(sql`CREATE TABLE IF NOT EXISTS empresa_mercado_pago_oauth_states (
+      id SERIAL PRIMARY KEY,
+      empresa_id INTEGER NOT NULL,
+      nonce TEXT NOT NULL UNIQUE,
+      oauth_environment TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await db.execute(sql`ALTER TABLE pedidos_pdv ADD COLUMN IF NOT EXISTS pagamento_status TEXT`);
+  })().catch(error => { empresaMercadoPagoSchemaReady = null; throw error; });
+  return empresaMercadoPagoSchemaReady;
+}
+
+async function invalidateEmpresaSellerConnection(empresaId: number, code: string) {
+  await db.execute(sql`UPDATE empresa_mercado_pago_connections SET status = 'invalid', invalidated_at = NOW(),
+    last_error_code = ${code}, updated_at = NOW() WHERE empresa_id = ${empresaId}`);
+}
+async function empresaSellerAccessToken(empresaId: number, expectedSellerUserId: string) {
+  await ensureEmpresaMercadoPagoSchema();
+  return db.transaction(async tx => {
+    const rows = await tx.execute(sql`SELECT mercado_pago_user_id, encrypted_access_token, encrypted_refresh_token, expires_at, status
+      FROM empresa_mercado_pago_connections WHERE empresa_id = ${empresaId} FOR UPDATE`);
+    const connection = rows.rows[0] as any;
+    if (!connection || connection.status !== "active" || !connection.encrypted_access_token) throw new Error("seller_mercado_pago_connection_required");
+    if (!expectedSellerUserId || String(connection.mercado_pago_user_id) !== expectedSellerUserId) throw new Error("seller_connection_changed");
+    if (new Date(connection.expires_at).getTime() > Date.now() + 120_000) return decryptToken(connection.encrypted_access_token);
+    if (!connection.encrypted_refresh_token || !process.env.MERCADO_PAGO_CLIENT_ID || !process.env.MERCADO_PAGO_CLIENT_SECRET) throw new Error("seller_mercado_pago_connection_expired");
+    const body = new URLSearchParams({ grant_type: "refresh_token", client_id: process.env.MERCADO_PAGO_CLIENT_ID, client_secret: process.env.MERCADO_PAGO_CLIENT_SECRET, refresh_token: decryptToken(connection.encrypted_refresh_token) });
+    const response = await fetch("https://api.mercadopago.com/oauth/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    const refreshed: any = await response.json().catch(() => ({}));
+    if (!response.ok || !refreshed.access_token) {
+      const definitive = response.status === 401 || response.status === 403 || ["invalid_grant", "invalid_token", "unauthorized"].includes(String(refreshed.error));
+      if (definitive) {
+        await tx.execute(sql`UPDATE empresa_mercado_pago_connections SET status = 'invalid', invalidated_at = NOW(), last_error_code = ${String(refreshed.error || response.status)}, updated_at = NOW() WHERE empresa_id = ${empresaId}`);
+      }
+      throw new Error(definitive ? "seller_mercado_pago_refresh_invalid" : "seller_mercado_pago_refresh_unavailable");
+    }
+    await tx.execute(sql`UPDATE empresa_mercado_pago_connections SET encrypted_access_token = ${encryptToken(refreshed.access_token)},
+      encrypted_refresh_token = ${refreshed.refresh_token ? encryptToken(refreshed.refresh_token) : connection.encrypted_refresh_token},
+      expires_at = ${new Date(Date.now() + Math.max(60, Number(refreshed.expires_in || 0)) * 1000)}, last_refresh_at = NOW(), updated_at = NOW() WHERE empresa_id = ${empresaId}`);
+    if (refreshed.user_id !== undefined && String(refreshed.user_id) !== expectedSellerUserId) throw new Error("seller_connection_changed");
+    return String(refreshed.access_token);
+  });
+}
+async function hasPendingEmpresaMarketplacePayments(tx: any, empresaId: number, sellerUserId?: string) {
+  const pending = await tx.execute(sql`SELECT id FROM payment_transactions
+    WHERE module = ${PDV_MODULE} AND payment_source = 'mercado_pago' AND empresa_id = ${empresaId}
+      AND (${sellerUserId || null}::text IS NULL OR metadata->>'sellerMercadoPagoUserId' = ${sellerUserId || null})
+      AND status NOT IN ('approved', 'rejected', 'cancelled', 'canceled', 'refunded')
+    LIMIT 1 FOR UPDATE`);
+  return !!pending.rows[0];
+}
+async function empresaCommissionPercent(empresaId: number) {
+  const rows = await db.execute(sql`SELECT taxa_app FROM empresas WHERE id = ${empresaId} LIMIT 1`);
+  const raw = (rows.rows[0] as any)?.taxa_app;
+  const value = raw === null || raw === undefined ? DEFAULT_EMPRESA_COMMISSION_PERCENT : Number(raw);
+  return Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : DEFAULT_EMPRESA_COMMISSION_PERCENT;
+}
+/** Mirrors a PDV payment outcome on the order and notifies connected PDV screens. */
+async function syncPdvPedidoPayment(transactionId: number) {
+  const rows = await db.execute(sql`SELECT empresa_id, reference_id, status, payment_source FROM payment_transactions WHERE id = ${transactionId} AND module = ${PDV_MODULE} LIMIT 1`);
+  const transaction = rows.rows[0] as any;
+  if (!transaction) return;
+  await ensureEmpresaMercadoPagoSchema();
+  const pagamentoStatus = paymentState(String(transaction.status), String(transaction.payment_source));
+  const pedidoId = Number(transaction.reference_id);
+  const empresaId = Number(transaction.empresa_id);
+  await db.execute(sql`UPDATE pedidos_pdv SET pagamento_status = ${pagamentoStatus},
+    forma_pagamento = CASE WHEN ${pagamentoStatus} = 'pago' THEN 'mercado_pago' ELSE forma_pagamento END,
+    atualizado_em = NOW() WHERE id = ${pedidoId} AND empresa_id = ${empresaId}`);
+  broadcastToEmpresa(empresaId, { event: "pagamento_atualizado", pedidoId, pagamentoStatus, transactionId });
+}
+function pdvPaymentResponse(row: any) {
+  const metadata = (row.metadata || {}) as Record<string, any>;
+  const pending = !TERMINAL_STATUSES.has(String(row.status));
+  return {
+    transactionId: Number(row.id),
+    pedidoId: Number(row.reference_id),
+    method: row.method === "link" ? "link" : "pix",
+    status: String(row.status),
+    paymentStatus: paymentState(String(row.status), String(row.payment_source)),
+    amountCents: Number(row.gross_amount_cents),
+    platformFeeCents: Number(row.platform_fee_cents),
+    commissionPercent: Number(metadata.marketplaceCommissionPercent ?? 0),
+    pix: pending && row.method === "pix" ? sanitizedPixData(metadata.pix) : null,
+    paymentUrl: pending && row.method === "link" ? (row.init_point || row.sandbox_init_point || null) : null,
+    failure: metadata.paymentFailure?.code ?? null,
+    ...BETA,
+  };
+}
+function normalizedProviderStatus(status: string) {
+  if (status === "approved") return "approved";
+  if (status === "in_process") return "processing";
+  if (["rejected", "cancelled", "refunded"].includes(status)) return status;
+  if (status === "charged_back") return "refunded";
+  return "pending";
+}
+
+router.get("/pdv/mercado-pago/status", requirePartner, async (req, res) => {
+  const empresaId = (req as any).empresaId as number;
+  await ensureEmpresaMercadoPagoSchema();
+  const found = await db.execute(sql`SELECT encrypted_refresh_token, expires_at, status
+    FROM empresa_mercado_pago_connections WHERE empresa_id = ${empresaId} LIMIT 1`);
+  const row = found.rows[0] as any;
+  const active = row?.status === "active" && (!!row.encrypted_refresh_token || (!row.expires_at || new Date(row.expires_at).getTime() > Date.now()));
+  res.json({
+    connected: active,
+    status: active ? "active" : (row?.status || "disconnected"),
+    oauthConfigured: !!process.env.MERCADO_PAGO_CLIENT_ID && !!process.env.MERCADO_PAGO_CLIENT_SECRET,
+    commissionPercent: await empresaCommissionPercent(empresaId),
+    ...BETA,
+  });
+});
+router.post("/pdv/mercado-pago/connect", requirePartner, async (req, res) => {
+  const empresaId = (req as any).empresaId as number;
+  const clientId = process.env.MERCADO_PAGO_CLIENT_ID;
+  if (!clientId || !process.env.MERCADO_PAGO_CLIENT_SECRET) { res.status(503).json({ error: "mercado_pago_oauth_not_configured" }); return; }
+  try {
+    await ensureEmpresaMercadoPagoSchema();
+    const environment = empresaOauthEnvironment(), nonce = randomBytes(32).toString("base64url"), expiresAt = Date.now() + 10 * 60_000;
+    await db.execute(sql`DELETE FROM empresa_mercado_pago_oauth_states WHERE expires_at < NOW()`);
+    await db.execute(sql`INSERT INTO empresa_mercado_pago_oauth_states (empresa_id, nonce, oauth_environment, expires_at)
+      VALUES (${empresaId}, ${nonce}, ${environment}, ${new Date(expiresAt)})`);
+    const authorizeUrl = new URL("https://auth.mercadopago.com/authorization");
+    authorizeUrl.search = new URLSearchParams({ client_id: clientId, response_type: "code", platform_id: "mp", redirect_uri: sharedOauthCallbackUrl(), state: signEmpresaOauthState(empresaId, nonce, environment, expiresAt) }).toString();
+    res.json({ authorizeUrl: authorizeUrl.toString() });
+  } catch (err) { (req as any).log?.error({ err }, "Empresa Mercado Pago OAuth start failed"); res.status(500).json({ error: "mercado_pago_oauth_start_failed" }); }
+});
+router.post("/pdv/mercado-pago/disconnect", requirePartner, async (req, res) => {
+  const empresaId = (req as any).empresaId as number;
+  await ensureEmpresaMercadoPagoSchema();
+  const disconnected = await db.transaction(async tx => {
+    const connection = await tx.execute(sql`SELECT mercado_pago_user_id FROM empresa_mercado_pago_connections
+      WHERE empresa_id = ${empresaId} AND status = 'active' FOR UPDATE`);
+    const sellerUserId = String((connection.rows[0] as any)?.mercado_pago_user_id || "");
+    if (sellerUserId && await hasPendingEmpresaMarketplacePayments(tx, empresaId, sellerUserId)) return false;
+    await tx.execute(sql`UPDATE empresa_mercado_pago_connections SET status = 'disconnected', revoked_at = NOW(),
+      encrypted_access_token = NULL, encrypted_refresh_token = NULL, updated_at = NOW() WHERE empresa_id = ${empresaId}`);
+    return true;
+  });
+  if (!disconnected) {
+    res.status(409).json({ error: "marketplace_payments_pending", message: "Há pagamentos Mercado Pago pendentes. Aguarde a conclusão ou reconciliação antes de desconectar." });
+    return;
+  }
+  res.json({ disconnected: true });
+});
+
+function empresaConnectedHtml() {
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mercado Pago conectado — GoTaxi PDV</title>
+<style>body{font-family:system-ui,sans-serif;background:#f5f7fb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}main{background:#fff;border-radius:16px;padding:32px;max-width:420px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.08)}h1{color:#009EE3;font-size:22px}p{color:#475569}</style></head>
+<body><main><h1>Mercado Pago conectado</h1><p>A conta Mercado Pago da sua empresa foi conectada ao GoTaxi PDV. Você já pode fechar esta janela e voltar ao PDV.</p></main></body></html>`;
+}
+/** OAuth callback for empresas; shares the redirect URI registered for motoristas. */
+export async function handleEmpresaOauthCallback(req: Request, res: Response) {
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  const parsed = state ? parseEmpresaOauthState(state) : null;
+  if (!code || !parsed) { res.status(400).send("Conexão Mercado Pago inválida ou expirada."); return; }
+  try {
+    await ensureEmpresaMercadoPagoSchema();
+    const body = new URLSearchParams({ grant_type: "authorization_code", client_id: process.env.MERCADO_PAGO_CLIENT_ID || "", client_secret: process.env.MERCADO_PAGO_CLIENT_SECRET || "", code, redirect_uri: sharedOauthCallbackUrl() });
+    const response = await fetch("https://api.mercadopago.com/oauth/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    const token: any = await response.json().catch(() => ({}));
+    if (!response.ok || !token.access_token || !token.user_id) throw new Error(String(token.error || "oauth_exchange_failed"));
+    const expiresAt = new Date(Date.now() + Math.max(60, Number(token.expires_in || 0)) * 1000);
+    const connected = await db.transaction(async tx => {
+      const stateConsumed = await tx.execute(sql`UPDATE empresa_mercado_pago_oauth_states SET consumed_at = NOW()
+        WHERE empresa_id = ${parsed.empresaId} AND nonce = ${parsed.nonce} AND oauth_environment = ${parsed.environment}
+          AND expires_at > NOW() AND consumed_at IS NULL RETURNING id`);
+      if (!stateConsumed.rows[0]) return "state_invalid";
+      const previous = await tx.execute(sql`SELECT mercado_pago_user_id FROM empresa_mercado_pago_connections
+        WHERE empresa_id = ${parsed.empresaId} FOR UPDATE`);
+      const previousSeller = String((previous.rows[0] as any)?.mercado_pago_user_id || "");
+      if (previousSeller && previousSeller !== String(token.user_id) &&
+        await hasPendingEmpresaMarketplacePayments(tx, parsed.empresaId, previousSeller)) {
+        throw new Error("marketplace_payments_pending");
+      }
+      await tx.execute(sql`INSERT INTO empresa_mercado_pago_connections
+        (empresa_id, mercado_pago_user_id, encrypted_access_token, encrypted_refresh_token, expires_at, scopes, status, oauth_environment, revoked_at, invalidated_at, last_error_code, updated_at)
+        VALUES (${parsed.empresaId}, ${String(token.user_id)}, ${encryptToken(token.access_token)}, ${token.refresh_token ? encryptToken(token.refresh_token) : null}, ${expiresAt}, ${String(token.scope || "")}, 'active', ${parsed.environment}, NULL, NULL, NULL, NOW())
+        ON CONFLICT (empresa_id) DO UPDATE SET mercado_pago_user_id = EXCLUDED.mercado_pago_user_id, encrypted_access_token = EXCLUDED.encrypted_access_token, encrypted_refresh_token = EXCLUDED.encrypted_refresh_token, expires_at = EXCLUDED.expires_at, scopes = EXCLUDED.scopes, status = 'active', oauth_environment = EXCLUDED.oauth_environment, revoked_at = NULL, invalidated_at = NULL, last_error_code = NULL, updated_at = NOW()`);
+      return "connected";
+    });
+    if (connected === "state_invalid") { res.status(400).send("Conexão Mercado Pago já utilizada ou expirada."); return; }
+    res.type("html").send(empresaConnectedHtml());
+  } catch (err) {
+    if (err instanceof Error && err.message === "marketplace_payments_pending") {
+      res.status(409).type("html").send("<!doctype html><title>GoTaxi</title><p>Não é possível trocar a conta Mercado Pago enquanto há pagamentos pendentes. Aguarde a conclusão ou reconciliação e tente novamente.</p>");
+      return;
+    }
+    (req as any).log?.error({ err }, "Empresa Mercado Pago OAuth callback failed");
+    res.status(502).send("Não foi possível conectar o Mercado Pago. Tente novamente.");
+  }
+}
+
+router.post("/pdv/pedidos/:pedidoId/charge", requirePartner, async (req, res) => {
+  const empresaId = (req as any).empresaId as number;
+  const pedidoId = Number(req.params.pedidoId);
+  const method = req.body?.method === "pix" || req.body?.method === "link" ? req.body.method as "pix" | "link" : null;
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0 || !method) { res.status(400).json({ error: "invalid_charge_request" }); return; }
+  await ensureEmpresaMercadoPagoSchema();
+  const partnerConfig = await db.execute(sql`SELECT enabled FROM empresa_mercado_pago_configs WHERE empresa_id = ${empresaId} LIMIT 1`);
+  if (partnerConfig.rows[0] && !(partnerConfig.rows[0] as any).enabled) {
+    res.status(409).json({ error: "mercado_pago_disabled", message: "Ative o Mercado Pago em Configurações → Integração Mercado Pago." }); return;
+  }
+  const pedidos = await db.execute(sql`SELECT id, total, status FROM pedidos_pdv WHERE id = ${pedidoId} AND empresa_id = ${empresaId} LIMIT 1`);
+  const pedido = pedidos.rows[0] as any;
+  if (!pedido) { res.status(404).json({ error: "pedido_not_found" }); return; }
+  if (String(pedido.status) === "cancelado") { res.status(409).json({ error: "pedido_cancelado" }); return; }
+  const amountCents = Math.round(Number(pedido.total) * 100);
+  if (!Number.isInteger(amountCents) || amountCents <= 0) { res.status(400).json({ error: "invalid_amount" }); return; }
+  const connections = await db.execute(sql`SELECT mercado_pago_user_id FROM empresa_mercado_pago_connections
+    WHERE empresa_id = ${empresaId} AND status = 'active' LIMIT 1`);
+  const sellerUserId = String((connections.rows[0] as any)?.mercado_pago_user_id || "");
+  if (!sellerUserId) {
+    res.status(409).json({ error: "seller_mercado_pago_connection_required", message: "Conecte a conta Mercado Pago da empresa em Configurações → Integração Mercado Pago." }); return;
+  }
+  const commissionPercent = await empresaCommissionPercent(empresaId);
+  const feeCents = Math.min(amountCents, Math.round(amountCents * commissionPercent / 100));
+  const metadata = { empresaId, sellerMercadoPagoUserId: sellerUserId, marketplaceCommissionPercent: commissionPercent, marketplaceFeeCents: feeCents };
+  const externalReference = `pdv-${pedidoId}-${randomUUID()}`;
+  const idempotencyKey = randomUUID();
+  let staged: { row?: any; reuse?: boolean; conflict?: string };
+  try {
+    staged = await db.transaction(async tx => {
+      const previous = await tx.execute(sql`SELECT * FROM payment_transactions WHERE module = ${PDV_MODULE} AND reference_id = ${String(pedidoId)} FOR UPDATE`);
+      const current = previous.rows[0] as any;
+      if (current) {
+        if (Number(current.empresa_id) !== empresaId) return { conflict: "payment_intent_already_exists" };
+        if (current.status === "approved") return { row: current, reuse: true };
+        if (["pending", "processing"].includes(String(current.status))) {
+          return current.method === method ? { row: current, reuse: true } : { conflict: "payment_pending_other_method" };
+        }
+        const reset = await tx.execute(sql`UPDATE payment_transactions SET status = 'pending', method = ${method},
+          gross_amount_cents = ${amountCents}, platform_fee_cents = ${feeCents},
+          provider_preference_id = NULL, provider_payment_id = NULL, provider_order_id = NULL,
+          init_point = NULL, sandbox_init_point = NULL,
+          external_reference = ${externalReference}, idempotency_key = ${idempotencyKey},
+          metadata = ${JSON.stringify(metadata)}::jsonb, updated_at = NOW()
+          WHERE id = ${current.id} RETURNING *`);
+        return { row: reset.rows[0], reuse: false };
+      }
+      const inserted = await tx.execute(sql`INSERT INTO payment_transactions (empresa_id, module, reference_id, payment_source, method, status, gross_amount_cents, platform_fee_cents, external_reference, idempotency_key, metadata)
+        VALUES (${empresaId}, ${PDV_MODULE}, ${String(pedidoId)}, 'mercado_pago', ${method}, 'pending', ${amountCents}, ${feeCents}, ${externalReference}, ${idempotencyKey}, ${JSON.stringify(metadata)}::jsonb) RETURNING *`);
+      return { row: inserted.rows[0], reuse: false };
+    });
+  } catch (err) {
+    (req as any).log?.error({ err: err instanceof Error ? err.message : "unknown" }, "PDV payment staging failed");
+    res.status(500).json({ error: "payment_staging_failed" }); return;
+  }
+  if (staged.conflict) {
+    res.status(409).json({ error: staged.conflict, message: staged.conflict === "payment_pending_other_method" ? "Já existe uma cobrança pendente deste pedido com outra forma de pagamento." : undefined }); return;
+  }
+  const row = staged.row as any;
+  if (staged.reuse) { res.json(pdvPaymentResponse(row)); return; }
+  const notificationUrl = `${publicApiBaseUrl()}/api/payments/webhook/mercado-pago?pdv_tx=${row.id}`;
+  const description = `Pedido PDV #${pedidoId}`;
+  try {
+    const token = await empresaSellerAccessToken(empresaId, sellerUserId);
+    if (method === "pix") {
+      const payment = await mp("/v1/payments", token, {
+        method: "POST",
+        headers: { "X-Idempotency-Key": String(row.idempotency_key) },
+        body: JSON.stringify({
+          transaction_amount: amountCents / 100,
+          description,
+          external_reference: row.external_reference,
+          notification_url: notificationUrl,
+          payment_method_id: "pix",
+          payer: { email: `pdv-${empresaId}-${pedidoId}@clientes.gotaxi.app` },
+          marketplace_fee: feeCents / 100,
+          metadata: { transaction_id: row.id, empresa_id: empresaId, pedido_id: pedidoId },
+        }),
+      });
+      const status = normalizedProviderStatus(String(payment.status));
+      const pix = sanitizedPixData(payment.point_of_interaction?.transaction_data);
+      const updated = await db.execute(sql`UPDATE payment_transactions SET provider_payment_id = ${String(payment.id)}, status = ${status},
+        metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify(pix ? { pix, mercadoPagoTransactionId: String(payment.id) } : { mercadoPagoTransactionId: String(payment.id) })}::jsonb,
+        updated_at = NOW() WHERE id = ${row.id} RETURNING *`);
+      await syncPdvPedidoPayment(Number(row.id));
+      res.status(201).json(pdvPaymentResponse(updated.rows[0])); return;
+    }
+    const preference = await mp("/checkout/preferences", token, {
+      method: "POST",
+      headers: { "X-Idempotency-Key": String(row.idempotency_key) },
+      body: JSON.stringify({
+        items: [{ id: String(pedidoId), title: description, quantity: 1, unit_price: amountCents / 100, currency_id: "BRL" }],
+        external_reference: row.external_reference,
+        notification_url: notificationUrl,
+        marketplace_fee: feeCents / 100,
+        metadata: { transaction_id: row.id, empresa_id: empresaId, pedido_id: pedidoId },
+      }),
+    });
+    const updated = await db.execute(sql`UPDATE payment_transactions SET provider_preference_id = ${String(preference.id ?? "") || null},
+      init_point = ${typeof preference.init_point === "string" ? preference.init_point : null},
+      sandbox_init_point = ${typeof preference.sandbox_init_point === "string" ? preference.sandbox_init_point : null},
+      updated_at = NOW() WHERE id = ${row.id} RETURNING *`);
+    await syncPdvPedidoPayment(Number(row.id));
+    res.status(201).json(pdvPaymentResponse(updated.rows[0]));
+  } catch (error) {
+    if (error instanceof MercadoPagoApiError && (error.status === 401 || error.status === 403)) {
+      await invalidateEmpresaSellerConnection(empresaId, error.providerCode || String(error.status));
+    }
+    const failure = {
+      provider: "mercado_pago",
+      httpStatus: error instanceof MercadoPagoApiError ? error.status : null,
+      code: error instanceof MercadoPagoApiError ? (error.providerCode || "provider_error") : (error instanceof Error ? error.message : "unknown"),
+    };
+    await db.execute(sql`UPDATE payment_transactions SET status = 'cancelled',
+      metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify({ paymentFailure: failure })}::jsonb,
+      updated_at = NOW() WHERE id = ${row.id} AND status = 'pending'`);
+    (req as any).log?.error({ err: error instanceof Error ? error.message : "unknown", failure }, "PDV Mercado Pago charge failed");
+    res.status(502).json({ error: "mercado_pago_charge_failed", code: failure.code, message: "Não foi possível gerar a cobrança no Mercado Pago. Tente novamente." });
+  }
+});
+
+router.get("/pdv/pedidos/:pedidoId/payment", requirePartner, async (req, res) => {
+  const empresaId = (req as any).empresaId as number;
+  const pedidoId = Number(req.params.pedidoId);
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) { res.status(400).json({ error: "invalid_pedido_id" }); return; }
+  const rows = await db.execute(sql`SELECT * FROM payment_transactions WHERE module = ${PDV_MODULE} AND reference_id = ${String(pedidoId)} AND empresa_id = ${empresaId} LIMIT 1`);
+  let row = rows.rows[0] as any;
+  if (!row) { res.status(404).json({ error: "payment_not_found" }); return; }
+  const metadata = (row.metadata || {}) as Record<string, any>;
+  if (!TERMINAL_STATUSES.has(String(row.status)) && metadata.sellerMercadoPagoUserId) {
+    try {
+      const token = await empresaSellerAccessToken(empresaId, String(metadata.sellerMercadoPagoUserId));
+      let payment: any = null;
+      if (row.provider_payment_id && row.method !== "link") {
+        payment = await mp(`/v1/payments/${encodeURIComponent(String(row.provider_payment_id))}`, token);
+      } else {
+        const search = await mp(`/v1/payments/search?external_reference=${encodeURIComponent(String(row.external_reference))}&sort=date_created&criteria=desc`, token);
+        const results = Array.isArray(search?.results) ? search.results : [];
+        payment = results.find((p: any) => p?.status === "approved") ?? results[0] ?? null;
+      }
+      if (payment && String(payment.external_reference ?? "") === String(row.external_reference) &&
+        Math.round(Number(payment.transaction_amount) * 100) === Number(row.gross_amount_cents)) {
+        const providerStatus = normalizedProviderStatus(String(payment.status));
+        const status = row.method === "link" && providerStatus === "rejected" ? "pending" : providerStatus;
+        if (status !== row.status) {
+          const updated = await db.execute(sql`UPDATE payment_transactions SET status = ${status},
+            provider_payment_id = ${String(payment.id)},
+            metadata = CASE WHEN ${TERMINAL_STATUSES.has(status)} THEN COALESCE(metadata, '{}'::jsonb) - 'pix' ELSE metadata END,
+            updated_at = NOW() WHERE id = ${row.id} AND status IN ('pending', 'processing') RETURNING *`);
+          if (updated.rows[0]) { row = updated.rows[0]; await syncPdvPedidoPayment(Number(row.id)); }
+        }
+      }
+    } catch (error) {
+      (req as any).log?.warn({ err: error instanceof Error ? error.message : "unknown" }, "PDV payment reconciliation failed");
+    }
+  }
+  res.json(pdvPaymentResponse(row));
 });
 
 export default router;
