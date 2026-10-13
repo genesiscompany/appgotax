@@ -680,7 +680,62 @@ router.delete("/cards/:cardId", requireCustomer, async (req, res) => {
     res.status(502).json({ error: "mercado_pago_card_unavailable" });
   }
 });
-router.get("/wallet", requireCustomer, async (req, res) => { const r = await db.execute(sql`SELECT balance_cents FROM customer_wallet_accounts WHERE customer_id = ${(req as any).customerId} LIMIT 1`); res.json({ balanceCents: Number((r.rows[0] as any)?.balance_cents ?? 0), ...BETA }); });
+async function affiliateBalanceCents(customerId: number): Promise<number | null> {
+  try {
+    const r = await db.execute(sql`SELECT ROUND(saldo * 100)::bigint AS saldo_cents FROM afiliados WHERE usuario_id = ${customerId} LIMIT 1`);
+    const row = r.rows[0] as any;
+    return row ? Math.max(0, Number(row.saldo_cents ?? 0)) : null;
+  } catch {
+    return null;
+  }
+}
+router.get("/wallet", requireCustomer, async (req, res) => {
+  const customerId = (req as any).customerId;
+  const r = await db.execute(sql`SELECT balance_cents FROM customer_wallet_accounts WHERE customer_id = ${customerId} LIMIT 1`);
+  res.json({ balanceCents: Number((r.rows[0] as any)?.balance_cents ?? 0), affiliateBalanceCents: await affiliateBalanceCents(customerId), ...BETA });
+});
+/** Moves affiliate commission balance into the customer's wallet so it can be spent in the app. */
+router.post("/wallet/affiliate-transfer", requireCustomer, async (req, res) => {
+  const customerId = (req as any).customerId;
+  const amountCents = Number(req.body?.amountCents);
+  const clientKey = req.body?.idempotencyKey;
+  if (!Number.isInteger(amountCents) || amountCents < 100) { res.status(400).json({ error: "invalid_amount", message: "Valor mínimo R$ 1,00" }); return; }
+  if (typeof clientKey !== "string" || !/^[A-Za-z0-9_-]{8,100}$/.test(clientKey)) { res.status(400).json({ error: "invalid_idempotency_key" }); return; }
+  const idempotencyKey = `affiliate_transfer:${customerId}:${clientKey}`;
+  try {
+    const result = await db.transaction(async tx => {
+      const affiliateRows = await tx.execute(sql`SELECT id, ROUND(saldo * 100)::bigint AS saldo_cents FROM afiliados WHERE usuario_id = ${customerId} FOR UPDATE`);
+      const affiliate = affiliateRows.rows[0] as any;
+      if (!affiliate) return { error: "affiliate_not_found" as const };
+      const existing = await tx.execute(sql`SELECT balance_after_cents FROM customer_wallet_ledger WHERE idempotency_key = ${idempotencyKey} LIMIT 1`);
+      if (existing.rows[0]) {
+        return { transferred: false, balanceCents: Number((existing.rows[0] as any).balance_after_cents), affiliateBalanceCents: Number(affiliate.saldo_cents) };
+      }
+      if (Number(affiliate.saldo_cents) < amountCents) return { error: "insufficient_affiliate_balance" as const };
+      await tx.execute(sql`UPDATE afiliados SET saldo = saldo - (${amountCents}::numeric / 100) WHERE id = ${affiliate.id}`);
+      await tx.execute(sql`INSERT INTO customer_wallet_accounts (customer_id, balance_cents) VALUES (${customerId}, 0) ON CONFLICT (customer_id) DO NOTHING`);
+      const accountRows = await tx.execute(sql`SELECT id, balance_cents FROM customer_wallet_accounts WHERE customer_id = ${customerId} FOR UPDATE`);
+      const account = accountRows.rows[0] as any;
+      const balanceCents = Number(account.balance_cents) + amountCents;
+      await tx.execute(sql`UPDATE customer_wallet_accounts SET balance_cents = ${balanceCents}, updated_at = NOW() WHERE id = ${account.id}`);
+      await tx.execute(sql`INSERT INTO customer_wallet_ledger
+        (wallet_account_id, customer_id, transaction_id, direction, amount_cents, balance_after_cents, idempotency_key, description)
+        VALUES (${account.id}, ${customerId}, NULL, 'credit', ${amountCents}, ${balanceCents}, ${idempotencyKey}, 'Transferência do saldo de afiliado')`);
+      return { transferred: true, balanceCents, affiliateBalanceCents: Number(affiliate.saldo_cents) - amountCents };
+    });
+    if ("error" in result) {
+      res.status(result.error === "affiliate_not_found" ? 404 : 409).json({
+        error: result.error,
+        message: result.error === "affiliate_not_found" ? "Você ainda não tem perfil de afiliado." : "Saldo de afiliado insuficiente.",
+      });
+      return;
+    }
+    res.json(result);
+  } catch (error) {
+    (req as any).log?.error({ err: error instanceof Error ? error.message : "unknown" }, "Affiliate wallet transfer failed");
+    res.status(500).json({ error: "affiliate_transfer_failed" });
+  }
+});
 router.get("/wallet/ledger", requireCustomer, async (req, res) => { const r = await db.execute(sql`SELECT id, direction, amount_cents, balance_after_cents, description, created_at FROM customer_wallet_ledger WHERE customer_id = ${(req as any).customerId} ORDER BY id DESC LIMIT 100`); res.json({ entries: r.rows, ...BETA }); });
 router.get("/wallet/topup/pending", requireCustomer, async (req, res) => {
   const rows = await db.execute(sql`SELECT id, gross_amount_cents, metadata FROM payment_transactions
