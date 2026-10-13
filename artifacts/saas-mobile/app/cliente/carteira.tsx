@@ -6,7 +6,7 @@ import { router } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import Colors from "@/constants/colors";
 import { useCustomerAuth } from "@/context/CustomerAuthContext";
-import { getWallet, getWalletLedger, getPendingWalletTopup, getWalletTopupStatus, isPaymentUnauthorized, topupWallet, type WalletData, type WalletLedgerItem, type WalletPixTopup } from "@/api/payments";
+import { getWallet, getWalletLedger, getPendingWalletTopup, getWalletTopupStatus, isPaymentUnauthorized, topupWallet, transferAffiliateBalance, type WalletData, type WalletLedgerItem, type WalletPixTopup } from "@/api/payments";
 import ClienteBottomNav from "@/components/ClienteBottomNav";
 import { LinearGradient } from "expo-linear-gradient";
 
@@ -28,6 +28,7 @@ export default function CarteiraScreen() {
   const [topupAmount, setTopupAmount] = useState("");
   const [isToppingUp, setIsToppingUp] = useState(false);
   const [pendingPix, setPendingPix] = useState<WalletPixTopup | null>(null);
+  const [isTransferring, setIsTransferring] = useState(false);
 
   const encerrarSessaoExpirada = async () => {
     await logout();
@@ -113,6 +114,39 @@ export default function CarteiraScreen() {
     }
   };
 
+  const handleAffiliateTransfer = () => {
+    const amountCents = wallet?.affiliateBalanceCents ?? 0;
+    if (!customer?.token || amountCents < 100) {
+      Alert.alert("Aviso", "Você precisa de pelo menos R$ 1,00 de saldo de afiliado para transferir.");
+      return;
+    }
+    const idempotencyKey = `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+    Alert.alert(
+      "Transferir para a carteira",
+      `Transferir ${formatCents(amountCents)} do saldo de afiliado para a sua carteira? Depois de transferido, o valor só pode ser usado para pagar no app e não pode ser sacado via Pix.`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Transferir",
+          onPress: async () => {
+            setIsTransferring(true);
+            try {
+              const res = await transferAffiliateBalance(customer.token, amountCents, idempotencyKey);
+              setWallet(prev => prev ? { ...prev, balanceCents: res.balanceCents, affiliateBalanceCents: res.affiliateBalanceCents } : prev);
+              setLedger(await getWalletLedger(customer.token));
+              Alert.alert("Pronto", "O saldo de afiliado foi adicionado à sua carteira.");
+            } catch (e: any) {
+              if (isPaymentUnauthorized(e)) { await encerrarSessaoExpirada(); return; }
+              Alert.alert("Erro", e.message || "Não foi possível transferir o saldo.");
+            } finally {
+              setIsTransferring(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const formatCents = (cents: number) => {
     return (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
   };
@@ -153,6 +187,32 @@ export default function CarteiraScreen() {
             <Text style={styles.mpBadgeText}>Powered by Mercado Pago</Text>
           </View>
         </LinearGradient>
+
+        {wallet?.affiliateBalanceCents != null && (
+          <View style={[styles.topupSection, { backgroundColor: colors.card, borderColor: colors.border, marginBottom: 20 }]}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Saldo de afiliado</Text>
+            <Text style={[styles.balanceValue, { color: colors.text, fontSize: 24, marginTop: 0 }]}>
+              {formatCents(wallet.affiliateBalanceCents)}
+            </Text>
+            <Text style={[styles.sectionSub, { color: colors.textMuted }]}>
+              Comissões das suas indicações. Transfira para a carteira e use para pagar no app.
+            </Text>
+            <Pressable
+              style={[styles.topupBtn, { backgroundColor: BRAND_COLOR, alignSelf: "stretch", height: 48, opacity: wallet.affiliateBalanceCents < 100 ? 0.5 : 1 }]}
+              onPress={handleAffiliateTransfer}
+              disabled={isTransferring || wallet.affiliateBalanceCents < 100}
+            >
+              {isTransferring ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <>
+                  <Feather name="repeat" size={18} color="#fff" />
+                  <Text style={styles.topupBtnText}>Transferir para minha carteira</Text>
+                </>
+              )}
+            </Pressable>
+          </View>
+        )}
 
         <View style={[styles.topupSection, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Adicionar Saldo</Text>
