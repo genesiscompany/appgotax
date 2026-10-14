@@ -124,7 +124,7 @@ function semanaCorrenteRange() {
 
 // ── GET /maps-config ─────────────────────────────────────────────────────────
 router.get("/maps-config", (_req, res) => {
-  res.json({ key: process.env.GOOGLE_MAPS_KEY ?? "" });
+  res.json({ key: process.env.GOOGLE_MAPS_WEB_KEY || process.env.GOOGLE_MAPS_KEY || "" });
 });
 
 // ── GET /dashboard ───────────────────────────────────────────────────────────
