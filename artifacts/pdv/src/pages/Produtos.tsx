@@ -35,6 +35,7 @@ interface Produto {
   imagem?: string; ativo: boolean; categoria_id?: number; categoria_nome?: string;
   extras: Extra[];
   tamanhos?: Tamanho[] | null;
+  peso_kg?: number | null;
 }
 interface Promocao {
   id: number; nome: string; descricao?: string; tipo: string;
@@ -971,6 +972,7 @@ function ProdutoDialog({
   const [nome, setNome] = useState("");
   const [descricao, setDescricao] = useState("");
   const [preco, setPreco] = useState("");
+  const [pesoKg, setPesoKg] = useState("");
   const [categoriaId, setCategoriaId] = useState<string>("");
   const [selectedExtras, setSelectedExtras] = useState<Set<number>>(new Set());
   const [selectedGrupos, setSelectedGrupos] = useState<Set<number>>(new Set());
@@ -989,6 +991,7 @@ function ProdutoDialog({
       setNome(produto?.nome ?? "");
       setDescricao(produto?.descricao ?? "");
       setPreco(produto ? String(produto.preco) : "");
+      setPesoKg(produto?.peso_kg != null ? String(produto.peso_kg) : "");
       setCategoriaId(produto?.categoria_id ? String(produto.categoria_id) : "");
       setSelectedExtras(new Set((produto?.extras ?? []).map(e => e.id)));
       setSelectedGrupos(new Set());
@@ -1050,6 +1053,7 @@ function ProdutoDialog({
       nome: nome.trim(),
       descricao: descricao.trim() || undefined,
       preco: parseFloat(preco) || 0,
+      pesoKg: parseFloat(pesoKg.replace(",", ".")) > 0 ? parseFloat(pesoKg.replace(",", ".")) : null,
       categoriaId: categoriaId ? Number(categoriaId) : null,
       extraIds: Array.from(selectedExtras),
       tamanhos: tamanhosClean,
@@ -1175,6 +1179,19 @@ function ProdutoDialog({
               value={preco}
               onChange={e => setPreco(e.target.value)}
             />
+          </div>
+
+          <div className="relative">
+            <Input
+              type="number"
+              step="0.01"
+              min={0}
+              placeholder="Peso para envio pelos Correios (opcional)"
+              className="pr-10"
+              value={pesoKg}
+              onChange={e => setPesoKg(e.target.value)}
+            />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">kg</span>
           </div>
 
           {/* ── Tamanhos / Variantes (ex: Pizza Brotinho/Grande) ── */}

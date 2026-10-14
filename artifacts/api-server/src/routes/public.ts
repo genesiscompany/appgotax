@@ -9,6 +9,10 @@ import { dispatchEntregaToEntregadores } from "./motorista-app";
 import { customerIdFromRequest } from "../lib/customerToken";
 import { roadRoute } from "../lib/roadDistance";
 import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
+import {
+  cotarCorreios, normalizarCep, normalizarTabela, ufDoCep, zonaEnvio,
+  PESO_MAXIMO_KG, ZONA_LABEL, type OpcaoFrete, type ZonaCorreios,
+} from "../lib/correiosFrete";
 
 const router: IRouter = Router();
 
@@ -251,14 +255,123 @@ router.get("/ecommerce/:empresaId/produtos", async (req, res) => {
   }
 });
 
+// ── Frete Correios (tabela da loja, sem API dos Correios) ──────────────────
+type CotacaoCorreios = {
+  cep_origem: string; cep_destino: string; uf_origem: string; uf_destino: string;
+  zona: ZonaCorreios; zona_label: string; peso_kg: number; opcoes: OpcaoFrete[];
+};
+
+async function cotarFreteCorreios(
+  empresaId: number,
+  cepDestinoRaw: unknown,
+  itens: unknown,
+): Promise<{ ok: true; cotacao: CotacaoCorreios } | { ok: false; status: number; error: string; message: string }> {
+  const cfgRows = await db.execute(sql`SELECT * FROM config_ecommerce_pdv WHERE empresa_id = ${empresaId}`);
+  const cfg = cfgRows.rows[0] as any;
+  if (!cfg?.venda_nacional_ativo) {
+    return { ok: false, status: 400, error: "correios_indisponivel", message: "Esta loja não envia pelos Correios" };
+  }
+  const cepOrigem = normalizarCep(cfg.correios_cep_origem);
+  if (!cepOrigem) {
+    return { ok: false, status: 400, error: "correios_indisponivel", message: "A loja ainda não configurou o CEP de origem" };
+  }
+  const cepDestino = normalizarCep(cepDestinoRaw);
+  const ufDestino = cepDestino ? ufDoCep(cepDestino) : null;
+  if (!cepDestino || !ufDestino) {
+    return { ok: false, status: 400, error: "cep_invalido", message: "CEP de destino inválido" };
+  }
+  const zona = zonaEnvio(cepOrigem, cepDestino)!;
+
+  const lista = Array.isArray(itens) ? itens : [];
+  const ids = lista.map((i: any) => Number(i?.produto_id)).filter((id) => Number.isInteger(id) && id > 0);
+  const pesos = new Map<number, number>();
+  if (ids.length > 0) {
+    const r = await db.execute(sql`
+      SELECT id, peso_kg::float AS peso_kg FROM produtos_pdv
+      WHERE empresa_id = ${empresaId} AND id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+    `);
+    for (const row of r.rows as any[]) if (row.peso_kg != null) pesos.set(Number(row.id), Number(row.peso_kg));
+  }
+  const pesoPadrao = Number(cfg.correios_peso_padrao_kg ?? 0.5) || 0.5;
+  let pesoKg = 0;
+  for (const i of lista as any[]) {
+    const qtd = Math.max(1, Math.floor(Number(i?.quantidade ?? 1)) || 1);
+    pesoKg += (pesos.get(Number(i?.produto_id)) ?? pesoPadrao) * qtd;
+  }
+  if (pesoKg <= 0) pesoKg = pesoPadrao;
+  pesoKg = Math.round(pesoKg * 1000) / 1000;
+  if (pesoKg > PESO_MAXIMO_KG) {
+    return { ok: false, status: 400, error: "peso_excedido", message: `Pedido acima de ${PESO_MAXIMO_KG} kg não pode ser enviado pelos Correios` };
+  }
+
+  return {
+    ok: true,
+    cotacao: {
+      cep_origem: cepOrigem,
+      cep_destino: cepDestino,
+      uf_origem: ufDoCep(cepOrigem)!,
+      uf_destino: ufDestino,
+      zona,
+      zona_label: ZONA_LABEL[zona],
+      peso_kg: pesoKg,
+      opcoes: cotarCorreios(normalizarTabela(cfg.correios_tabela), zona, pesoKg),
+    },
+  };
+}
+
+// ── GET /api/public/ecommerce/:empresaId/envio ─────────────────────────────
+router.get("/ecommerce/:empresaId/envio", async (req, res) => {
+  try {
+    const empresaId = Number(req.params.empresaId);
+    if (!empresaId || isNaN(empresaId)) return res.status(400).json({ error: "invalid_id" });
+    const r = await db.execute(sql`SELECT venda_nacional_ativo, correios_cep_origem FROM config_ecommerce_pdv WHERE empresa_id = ${empresaId}`);
+    const cfg = r.rows[0] as any;
+    return res.json({ correios_ativo: Boolean(cfg?.venda_nacional_ativo && normalizarCep(cfg?.correios_cep_origem)) });
+  } catch (err) {
+    console.error(err);
+    return res.json({ correios_ativo: false });
+  }
+});
+
+// ── POST /api/public/ecommerce/:empresaId/frete-correios ───────────────────
+router.post("/ecommerce/:empresaId/frete-correios", async (req, res) => {
+  try {
+    const empresaId = Number(req.params.empresaId);
+    if (!empresaId || isNaN(empresaId)) return res.status(400).json({ error: "invalid_id" });
+    const result = await cotarFreteCorreios(empresaId, req.body?.cep, req.body?.itens);
+    if (!result.ok) return res.status(result.status).json({ error: result.error, message: result.message });
+    return res.json(result.cotacao);
+  } catch (err) {
+    console.error("[ecommerce/frete-correios]", err);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
 // ── POST /api/public/ecommerce/pedido ──────────────────────────────────────
 // Create an ecommerce order from the mobile customer app
 router.post("/ecommerce/pedido", async (req, res) => {
   try {
-    const { empresa_id, itens, total, cliente_nome, cliente_telefone, cliente_endereco, forma_pagamento } = req.body;
+    const { empresa_id, itens, cliente_nome, cliente_telefone, forma_pagamento } = req.body;
+    let { total, cliente_endereco } = req.body;
     if (!empresa_id || !itens || !Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ error: "bad_request", message: "empresa_id e itens são obrigatórios" });
     }
+
+    let envioCorreios: { opcao: OpcaoFrete; cotacao: CotacaoCorreios } | null = null;
+    if (req.body.tipo_entrega === "correios") {
+      const result = await cotarFreteCorreios(Number(empresa_id), req.body.cep_destino, itens);
+      if (!result.ok) return res.status(result.status).json({ error: result.error, message: result.message });
+      const opcao = result.cotacao.opcoes.find((o) => o.servico === req.body.frete_servico);
+      if (!opcao) return res.status(400).json({ error: "frete_servico_invalido", message: "Escolha PAC ou SEDEX" });
+      envioCorreios = { opcao, cotacao: result.cotacao };
+      const subtotal = itens.reduce((acc: number, i: any) => acc + Number(i.preco ?? 0) * Number(i.quantidade ?? 1), 0);
+      total = Math.round((subtotal + opcao.valor) * 100) / 100;
+      const cepFmt = `${result.cotacao.cep_destino.slice(0, 5)}-${result.cotacao.cep_destino.slice(5)}`;
+      cliente_endereco = [String(cliente_endereco || "").trim(), `CEP ${cepFmt}`].filter(Boolean).join(" — ");
+    }
+    const observacoesEnvio = envioCorreios
+      ? `Envio Correios ${envioCorreios.opcao.nome} — R$ ${envioCorreios.opcao.valor.toFixed(2)} — prazo estimado ${envioCorreios.opcao.prazo_dias} dia(s) útil(eis) — ${envioCorreios.cotacao.peso_kg} kg (${envioCorreios.cotacao.uf_origem} → ${envioCorreios.cotacao.uf_destino})`
+      : null;
     const itensJson = JSON.stringify(itens.map((i: any) => ({
       nome: String(i.nome ?? ""),
       quantidade: Number(i.quantidade ?? 1),
@@ -288,13 +401,17 @@ router.post("/ecommerce/pedido", async (req, res) => {
       const [pdvPedido] = await db.insert(pedidosPdvTable).values({
         empresaId: Number(empresa_id),
         modulo: "ecommerce",
-        tipo: "delivery",
+        tipo: envioCorreios ? "correios" : "delivery",
         status: "novo",
         clienteNome: String(cliente_nome || "Cliente App"),
         clienteWhatsapp: cliente_telefone ? String(cliente_telefone) : null,
         clienteEndereco: cliente_endereco ? String(cliente_endereco) : null,
         total: Number(total) || 0,
         formaPagamento: fp,
+        ...(envioCorreios ? {
+          taxaEntrega: envioCorreios.opcao.valor.toFixed(2),
+          observacoes: observacoesEnvio,
+        } : {}),
       }).returning();
       const itensSalvos: any[] = [];
       for (const i of itens) {
@@ -323,7 +440,12 @@ router.post("/ecommerce/pedido", async (req, res) => {
       console.error("[ecommerce/pedido] mirror to pedidos_pdv failed", mirrorErr);
     }
 
-    return res.status(201).json({ id: pedido.id, status: pedido.status });
+    return res.status(201).json({
+      id: pedido.id,
+      status: pedido.status,
+      total: Number(total) || 0,
+      ...(envioCorreios ? { frete: envioCorreios.opcao } : {}),
+    });
   } catch (err) {
     console.error("[ecommerce/pedido]", err);
     return res.status(500).json({ error: "server_error", message: "Erro ao criar pedido" });

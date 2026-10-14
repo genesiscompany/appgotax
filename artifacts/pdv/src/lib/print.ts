@@ -21,7 +21,7 @@ export interface PrintData {
 }
 
 export function printCupom(data: PrintData) {
-  const tipo = { delivery: "Delivery", retirar: "Retirada", local: "Consumo Local", mesa: `Mesa ${data.mesa || ""}` }[data.tipo] ?? data.tipo;
+  const tipo = { delivery: "Delivery", retirar: "Retirada", correios: "Envio Correios", local: "Consumo Local", mesa: `Mesa ${data.mesa || ""}` }[data.tipo] ?? data.tipo;
 
   const itensHTML = data.itens.map(item => `
     <tr>

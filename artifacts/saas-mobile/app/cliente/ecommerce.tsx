@@ -55,6 +55,14 @@ type ConfigEntrega = {
   km_minimo: number; taxa_minima: number; raio_max_km: number | null; ativo: boolean;
 };
 
+type OpcaoFrete = { servico: "pac" | "sedex"; nome: string; valor: number; prazo_dias: number };
+type CotacaoCorreios = { zona_label: string; uf_origem: string; uf_destino: string; peso_kg: number; opcoes: OpcaoFrete[] };
+
+const formatCep = (v: string) => {
+  const d = v.replace(/\D/g, "").slice(0, 8);
+  return d.length > 5 ? `${d.slice(0, 5)}-${d.slice(5)}` : d;
+};
+
 type PlaceSuggestion = {
   place_id: string; description: string; main_text: string; secondary_text: string;
 };
@@ -93,7 +101,16 @@ export default function ClienteEcommerce() {
     }
   }, [customer?.token]);
 
-  const [tipoEntrega, setTipoEntrega] = useState<"delivery" | "retirar">("delivery");
+  const [tipoEntrega, setTipoEntrega] = useState<"delivery" | "retirar" | "correios">("delivery");
+
+  // ── Correios (frete por CEP) ──────────────────────────────────────────────
+  const [correiosAtivo, setCorreiosAtivo] = useState(false);
+  const [cepDestino, setCepDestino] = useState("");
+  const [enderecoCorreios, setEnderecoCorreios] = useState("");
+  const [cotacao, setCotacao] = useState<CotacaoCorreios | null>(null);
+  const [cotacaoErro, setCotacaoErro] = useState<string | null>(null);
+  const [cotando, setCotando] = useState(false);
+  const [servicoSel, setServicoSel] = useState<"pac" | "sedex" | null>(null);
   const [horarioRetirada, setHorarioRetirada] = useState("");
   const [tempoEntregaEco, setTempoEntregaEco] = useState(30);
 
@@ -123,6 +140,10 @@ export default function ClienteEcommerce() {
     fetch(`${API_BASE}/public/ecommerce/${empresaId}/formas-pagamento`)
       .then(r => r.json())
       .then(data => { if (Array.isArray(data?.metodos) && data.metodos.length) setMetodosPag(data.metodos); })
+      .catch(() => {});
+    fetch(`${API_BASE}/public/ecommerce/${empresaId}/envio`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setCorreiosAtivo(Boolean(d?.correios_ativo)))
       .catch(() => {});
     // Load full delivery config (for km-based freight calculation)
     fetch(`${API_BASE}/food/empresa/${empresaId}/config-entrega`)
@@ -212,6 +233,34 @@ export default function ClienteEcommerce() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [placeSel, numero]);
 
+  const correiosItensKey = myItems.map(c => `${c.produto.id}:${c.qtd}`).join(",");
+  useEffect(() => {
+    const cep = cepDestino.replace(/\D/g, "");
+    setCotacao(null);
+    setCotacaoErro(null);
+    setServicoSel(null);
+    if (tipoEntrega !== "correios" || cep.length !== 8 || !empresaId || myItems.length === 0) return;
+    let cancelado = false;
+    setCotando(true);
+    fetch(`${API_BASE}/public/ecommerce/${empresaId}/frete-correios`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cep, itens: myItems.map(c => ({ produto_id: c.produto.id, quantidade: c.qtd })) }),
+    })
+      .then(async r => {
+        const data = await r.json();
+        if (cancelado) return;
+        if (!r.ok) { setCotacaoErro(data?.message || "Não foi possível calcular o frete"); return; }
+        setCotacao(data);
+      })
+      .catch(() => { if (!cancelado) setCotacaoErro("Não foi possível calcular o frete"); })
+      .finally(() => { if (!cancelado) setCotando(false); });
+    return () => { cancelado = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cepDestino, tipoEntrega, empresaId, correiosItensKey]);
+
+  const opcaoCorreios = cotacao?.opcoes.find(o => o.servico === servicoSel) ?? null;
+
   const handleAddCarrinho = (produto: ProdutoDB) => {
     addItem(
       { id: produto.id, nome: produto.nome, preco: Number(produto.preco_promocional || produto.preco), cor: MOD_COLOR },
@@ -229,21 +278,32 @@ export default function ClienteEcommerce() {
       Alert.alert("Fora do raio", freteInfo.mensagem ?? "Seu endereço está fora do raio de entrega.");
       return;
     }
+    if (tipoEntrega === "correios") {
+      if (!opcaoCorreios) {
+        Alert.alert("Correios", "Informe o CEP e escolha PAC ou SEDEX.");
+        return;
+      }
+      if (enderecoCorreios.trim().length < 10) {
+        Alert.alert("Correios", "Informe o endereço completo para envio (rua, número, bairro e cidade).");
+        return;
+      }
+    }
     setEnviandoPedido(true);
     try {
-      const taxa = tipoEntrega === "delivery" ? (taxaCalculada ?? 0) : 0;
+      const taxa = tipoEntrega === "delivery" ? (taxaCalculada ?? 0) : tipoEntrega === "correios" ? (opcaoCorreios?.valor ?? 0) : 0;
       const totalFinal = myTotal + taxa;
       const body = {
         empresa_id: empresaId,
-        itens: myItems.map(c => ({ nome: c.produto.nome, quantidade: c.qtd, preco: c.produto.preco })),
+        itens: myItems.map(c => ({ produto_id: c.produto.id, nome: c.produto.nome, quantidade: c.qtd, preco: c.produto.preco })),
         total: totalFinal,
         taxa_entrega: taxa,
         tipo_entrega: tipoEntrega,
         horario_retirada: tipoEntrega === "retirar" ? (horarioRetirada || "A combinar") : null,
         cliente_nome: customer?.nome || "Cliente App",
         cliente_telefone: customer?.whatsapp || "",
-        cliente_endereco: tipoEntrega === "delivery" ? enderecoFinal : "",
+        cliente_endereco: tipoEntrega === "delivery" ? enderecoFinal : tipoEntrega === "correios" ? enderecoCorreios.trim() : "",
         forma_pagamento: formaSel,
+        ...(tipoEntrega === "correios" ? { cep_destino: cepDestino.replace(/\D/g, ""), frete_servico: servicoSel } : {}),
       };
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (customer?.token) headers["Authorization"] = `Bearer ${customer.token}`;
@@ -330,7 +390,7 @@ export default function ClienteEcommerce() {
   }
 
   if (showCarrinho) {
-    const taxaEntrega = tipoEntrega === "retirar" ? 0 : (taxaCalculada ?? 0);
+    const taxaEntrega = tipoEntrega === "retirar" ? 0 : tipoEntrega === "correios" ? (opcaoCorreios?.valor ?? 0) : (taxaCalculada ?? 0);
     const totalFinal = myTotal + taxaEntrega;
     const isFixa = configEntrega?.tipo === "fixa";
     const isKm = configEntrega?.tipo === "km";
@@ -410,6 +470,12 @@ export default function ClienteEcommerce() {
                   </View>
                   {tipoEntrega === "retirar" ? (
                     <Text style={[{ color: "#10B981", fontFamily: "Inter_600SemiBold", fontSize: 14 }]}>Grátis</Text>
+                  ) : tipoEntrega === "correios" ? (
+                    opcaoCorreios ? (
+                      <Text style={[{ color: colors.text, fontFamily: "Inter_600SemiBold", fontSize: 14 }]}>R$ {opcaoCorreios.valor.toFixed(2)}</Text>
+                    ) : (
+                      <Text style={[{ color: colors.textMuted, fontFamily: "Inter_400Regular", fontSize: 12 }]}>informe o CEP</Text>
+                    )
                   ) : calculandoFrete ? (
                     <ActivityIndicator size="small" color={corEmpresa} />
                   ) : freteInfo?.fora_raio ? (
@@ -428,7 +494,7 @@ export default function ClienteEcommerce() {
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                   <Text style={[{ color: colors.text, fontFamily: "Inter_700Bold", fontSize: 16 }]}>Total</Text>
                   <Text style={[{ color: corEmpresa, fontFamily: "Inter_700Bold", fontSize: 22 }]}>
-                    {semEnderecoKm || freteInfo?.fora_raio ? `R$ ${myTotal.toFixed(2)}+` : `R$ ${totalFinal.toFixed(2)}`}
+                    {(tipoEntrega === "correios" && !opcaoCorreios) || (tipoEntrega === "delivery" && (semEnderecoKm || freteInfo?.fora_raio)) ? `R$ ${myTotal.toFixed(2)}+` : `R$ ${totalFinal.toFixed(2)}`}
                   </Text>
                 </View>
               </View>
@@ -460,6 +526,70 @@ export default function ClienteEcommerce() {
                     {tipoEntrega === "retirar" && <Feather name="check-circle" size={18} color={corEmpresa} />}
                   </Pressable>
                 </View>
+                {correiosAtivo && (
+                  <Pressable onPress={() => setTipoEntrega("correios")}
+                    style={[{ flexDirection: "row", alignItems: "center", gap: 10, padding: 14, borderRadius: 12, borderWidth: 2,
+                      borderColor: tipoEntrega === "correios" ? corEmpresa : colors.border,
+                      backgroundColor: tipoEntrega === "correios" ? corEmpresa + "15" : colors.card }]}>
+                    <Feather name="package" size={20} color={tipoEntrega === "correios" ? corEmpresa : colors.textMuted} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[{ color: colors.text, fontFamily: tipoEntrega === "correios" ? "Inter_700Bold" : "Inter_500Medium", fontSize: 14 }]}>Correios</Text>
+                      <Text style={[{ color: colors.textMuted, fontFamily: "Inter_400Regular", fontSize: 11 }]}>PAC ou SEDEX para todo o Brasil</Text>
+                    </View>
+                    {tipoEntrega === "correios" && <Feather name="check-circle" size={18} color={corEmpresa} />}
+                  </Pressable>
+                )}
+
+                {tipoEntrega === "correios" && (
+                  <View style={{ gap: 8 }}>
+                    <Text style={[{ color: colors.text, fontFamily: "Inter_600SemiBold", fontSize: 13 }]}>CEP de entrega</Text>
+                    <TextInput
+                      style={[{ backgroundColor: colors.card, borderWidth: 1.5, borderColor: cotacao ? corEmpresa : colors.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, color: colors.text, fontFamily: "Inter_400Regular", fontSize: 14 }]}
+                      placeholder="00000-000"
+                      placeholderTextColor={colors.textMuted}
+                      value={cepDestino}
+                      onChangeText={v => setCepDestino(formatCep(v))}
+                      keyboardType="numeric"
+                      maxLength={9}
+                    />
+                    {cotando ? (
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                        <ActivityIndicator size="small" color={corEmpresa} />
+                        <Text style={[{ color: colors.textMuted, fontFamily: "Inter_400Regular", fontSize: 12 }]}>Calculando frete...</Text>
+                      </View>
+                    ) : cotacaoErro ? (
+                      <Text style={[{ color: "#EF4444", fontFamily: "Inter_400Regular", fontSize: 12 }]}>⚠ {cotacaoErro}</Text>
+                    ) : cotacao ? (
+                      <View style={{ gap: 8 }}>
+                        <Text style={[{ color: colors.textMuted, fontFamily: "Inter_400Regular", fontSize: 11 }]}>
+                          {cotacao.uf_origem} → {cotacao.uf_destino} • {cotacao.zona_label} • {cotacao.peso_kg} kg
+                        </Text>
+                        {cotacao.opcoes.map(o => (
+                          <Pressable key={o.servico} onPress={() => setServicoSel(o.servico)}
+                            style={[{ flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: 10, borderWidth: 1.5,
+                              borderColor: servicoSel === o.servico ? corEmpresa : colors.border,
+                              backgroundColor: servicoSel === o.servico ? corEmpresa + "15" : colors.card }]}>
+                            <Feather name={servicoSel === o.servico ? "check-circle" : "circle"} size={18} color={servicoSel === o.servico ? corEmpresa : colors.textMuted} />
+                            <View style={{ flex: 1 }}>
+                              <Text style={[{ color: colors.text, fontFamily: "Inter_600SemiBold", fontSize: 14 }]}>{o.nome}</Text>
+                              <Text style={[{ color: colors.textMuted, fontFamily: "Inter_400Regular", fontSize: 11 }]}>Até {o.prazo_dias} dia(s) útil(eis) após o envio</Text>
+                            </View>
+                            <Text style={[{ color: colors.text, fontFamily: "Inter_700Bold", fontSize: 14 }]}>R$ {o.valor.toFixed(2)}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    ) : null}
+                    <Text style={[{ color: colors.text, fontFamily: "Inter_600SemiBold", fontSize: 13, marginTop: 4 }]}>Endereço completo</Text>
+                    <TextInput
+                      style={[{ backgroundColor: colors.card, borderWidth: 1.5, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, color: colors.text, fontFamily: "Inter_400Regular", fontSize: 14, minHeight: 60, textAlignVertical: "top" }]}
+                      placeholder="Rua, número, complemento, bairro, cidade"
+                      placeholderTextColor={colors.textMuted}
+                      value={enderecoCorreios}
+                      onChangeText={setEnderecoCorreios}
+                      multiline
+                    />
+                  </View>
+                )}
 
                 {/* ── Address autocomplete (delivery only) ─────── */}
                 {tipoEntrega === "delivery" && configEntrega && (

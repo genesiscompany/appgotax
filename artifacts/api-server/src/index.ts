@@ -462,6 +462,22 @@ async function runStartupMigrations() {
     `ALTER TABLE pedidos_pdv ADD COLUMN IF NOT EXISTS comprovante_pix TEXT`,
     `ALTER TABLE ecommerce_pedidos ADD COLUMN IF NOT EXISTS comprovante_pix TEXT`,
 
+    // ── E-commerce: frete Correios por tabela (sem API) ──────────────────────
+    `CREATE TABLE IF NOT EXISTS config_ecommerce_pdv (
+      id SERIAL PRIMARY KEY,
+      empresa_id INTEGER NOT NULL UNIQUE,
+      venda_local_ativo BOOLEAN NOT NULL DEFAULT true,
+      raio_km INTEGER NOT NULL DEFAULT 15,
+      venda_nacional_ativo BOOLEAN NOT NULL DEFAULT false,
+      jadlog_contrato TEXT,
+      jadlog_senha TEXT,
+      criado_em TIMESTAMP NOT NULL DEFAULT NOW()
+    )`,
+    `ALTER TABLE config_ecommerce_pdv ADD COLUMN IF NOT EXISTS correios_cep_origem TEXT`,
+    `ALTER TABLE config_ecommerce_pdv ADD COLUMN IF NOT EXISTS correios_tabela JSONB`,
+    `ALTER TABLE config_ecommerce_pdv ADD COLUMN IF NOT EXISTS correios_peso_padrao_kg NUMERIC(8,3) NOT NULL DEFAULT 0.5`,
+    `ALTER TABLE produtos_pdv ADD COLUMN IF NOT EXISTS peso_kg NUMERIC(8,3)`,
+
     // ── Configurações globais (chave/valor) ──────────────────────────────────
     `CREATE TABLE IF NOT EXISTS gotatxi_config (
       chave TEXT PRIMARY KEY,

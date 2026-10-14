@@ -35,6 +35,7 @@ const TIPO_MAP: Record<string, string> = {
   mesa: "Mesa",
   retirar: "Retirar",
   local: "Local",
+  correios: "Correios",
 };
 
 export default function Pedidos() {

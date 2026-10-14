@@ -9,6 +9,7 @@ import { uploadImageToGCS, productImagePublicUrl } from "../lib/uploadImage";
 import { sendFcmNotification } from "./motorista-app";
 import { decodeClienteTokenFromReq, gerarComissaoCliente } from "../lib/comissaoAfiliado";
 import { createPdvToken, verifyPdvFinancialToken } from "../lib/pdvFinancialAuth";
+import { normalizarCep, normalizarTabela, ufDoCep, PESO_MAXIMO_KG } from "../lib/correiosFrete";
 
 const uploadsDir = path.resolve(process.cwd(), "uploads/comprovantes");
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -724,7 +725,7 @@ router.get("/produtos", async (req, res) => {
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
     const rows = await db.execute(`
       SELECT p.id, p.nome, p.descricao, p.preco, p.imagem, p.ativo,
-             p.categoria_id, p.tamanhos, c.nome as categoria_nome,
+             p.categoria_id, p.tamanhos, p.peso_kg::float AS peso_kg, c.nome as categoria_nome,
              COALESCE(
                json_agg(json_build_object('id', e.id, 'nome', e.nome, 'preco', e.preco))
                FILTER (WHERE e.id IS NOT NULL), '[]'
@@ -741,11 +742,16 @@ router.get("/produtos", async (req, res) => {
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
+function pesoKgSql(value: unknown): string {
+  const n = Number(value);
+  return value === null || value === "" || !Number.isFinite(n) || n <= 0 ? "NULL" : String(Math.min(n, PESO_MAXIMO_KG));
+}
+
 router.post("/produtos", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const { nome, categoriaId, descricao, preco, extraIds, tamanhos } = req.body;
+    const { nome, categoriaId, descricao, preco, extraIds, tamanhos, pesoKg } = req.body;
     if (!nome) return res.status(400).json({ error: "nome required" });
     const tamanhosClean = Array.isArray(tamanhos)
       ? tamanhos
@@ -756,9 +762,9 @@ router.post("/produtos", async (req, res) => {
       ? `'${JSON.stringify(tamanhosClean).replace(/'/g, "''")}'::jsonb`
       : "NULL";
     const rows = await db.execute(`
-      INSERT INTO produtos_pdv (empresa_id, categoria_id, nome, descricao, preco, tamanhos)
-      VALUES (${empresaId}, ${categoriaId ? Number(categoriaId) : "NULL"}, '${String(nome).replace(/'/g, "''")}', ${descricao ? `'${String(descricao).replace(/'/g, "''")}'` : "NULL"}, ${Number(preco) || 0}, ${tamanhosSql})
-      RETURNING id, nome, descricao, preco, imagem, ativo, categoria_id, tamanhos
+      INSERT INTO produtos_pdv (empresa_id, categoria_id, nome, descricao, preco, tamanhos, peso_kg)
+      VALUES (${empresaId}, ${categoriaId ? Number(categoriaId) : "NULL"}, '${String(nome).replace(/'/g, "''")}', ${descricao ? `'${String(descricao).replace(/'/g, "''")}'` : "NULL"}, ${Number(preco) || 0}, ${tamanhosSql}, ${pesoKgSql(pesoKg)})
+      RETURNING id, nome, descricao, preco, imagem, ativo, categoria_id, tamanhos, peso_kg::float AS peso_kg
     `);
     const produto = rows.rows[0] as any;
     if (extraIds && Array.isArray(extraIds) && extraIds.length > 0) {
@@ -786,13 +792,14 @@ router.patch("/produtos/:id", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const { nome, categoriaId, descricao, preco, ativo, extraIds, tamanhos } = req.body;
+    const { nome, categoriaId, descricao, preco, ativo, extraIds, tamanhos, pesoKg } = req.body;
     const sets: string[] = [];
     if (nome !== undefined) sets.push(`nome = '${String(nome).replace(/'/g, "''")}'`);
     if (categoriaId !== undefined) sets.push(`categoria_id = ${categoriaId ? Number(categoriaId) : "NULL"}`);
     if (descricao !== undefined) sets.push(`descricao = ${descricao ? `'${String(descricao).replace(/'/g, "''")}'` : "NULL"}`);
     if (preco !== undefined) sets.push(`preco = ${Number(preco)}`);
     if (ativo !== undefined) sets.push(`ativo = ${Boolean(ativo)}`);
+    if (pesoKg !== undefined) sets.push(`peso_kg = ${pesoKgSql(pesoKg)}`);
     if (tamanhos !== undefined) {
       const tamanhosClean = Array.isArray(tamanhos)
         ? tamanhos
@@ -808,7 +815,7 @@ router.patch("/produtos/:id", async (req, res) => {
     let rows;
     if (sets.length > 0) {
       rows = await db.execute(
-        `UPDATE produtos_pdv SET ${sets.join(", ")} WHERE id = ${Number(req.params.id)} AND empresa_id = ${empresaId} RETURNING id, nome, descricao, preco, imagem, ativo, categoria_id, tamanhos`
+        `UPDATE produtos_pdv SET ${sets.join(", ")} WHERE id = ${Number(req.params.id)} AND empresa_id = ${empresaId} RETURNING id, nome, descricao, preco, imagem, ativo, categoria_id, tamanhos, peso_kg::float AS peso_kg`
       );
     }
     if (extraIds !== undefined && Array.isArray(extraIds)) {
@@ -2012,15 +2019,23 @@ router.put("/viagens/passagens/:id", async (req, res) => {
 });
 
 // ── GET /api/pdv/ecommerce/config ─────────────────────────────────────────────
+function ecommerceConfigResponse(row: any) {
+  return {
+    venda_local_ativo: row ? Boolean(row.venda_local_ativo) : true,
+    raio_km: row ? Number(row.raio_km) : 15,
+    venda_nacional_ativo: row ? Boolean(row.venda_nacional_ativo) : false,
+    correios_cep_origem: row?.correios_cep_origem ?? null,
+    correios_tabela: normalizarTabela(row?.correios_tabela),
+    correios_peso_padrao_kg: row?.correios_peso_padrao_kg != null ? Number(row.correios_peso_padrao_kg) : 0.5,
+  };
+}
+
 router.get("/ecommerce/config", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const rows = await db.execute(`SELECT * FROM config_ecommerce_pdv WHERE empresa_id = ${empresaId}`);
-    if (rows.rows.length === 0) {
-      return res.json({ venda_local_ativo: true, raio_km: 15, venda_nacional_ativo: false, jadlog_contrato: null });
-    }
-    return res.json(rows.rows[0]);
+    const rows = await db.execute(sql`SELECT * FROM config_ecommerce_pdv WHERE empresa_id = ${empresaId}`);
+    return res.json(ecommerceConfigResponse(rows.rows[0]));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
@@ -2029,26 +2044,44 @@ router.put("/ecommerce/config", async (req, res) => {
   try {
     const empresaId = getEmpresaId(req);
     if (!empresaId) return res.status(401).json({ error: "unauthorized" });
-    const { venda_local_ativo, raio_km, venda_nacional_ativo, jadlog_contrato, jadlog_senha } = req.body;
+    const body = req.body ?? {};
+    const atualRows = await db.execute(sql`SELECT * FROM config_ecommerce_pdv WHERE empresa_id = ${empresaId}`);
+    const atual = ecommerceConfigResponse(atualRows.rows[0]);
 
-    const localAtivo   = venda_local_ativo   !== undefined ? Boolean(venda_local_ativo)   : true;
-    const raio         = raio_km             !== undefined ? Math.min(Math.max(Number(raio_km), 1), 100) : 15;
-    const nacionalAtivo = venda_nacional_ativo !== undefined ? Boolean(venda_nacional_ativo) : false;
-    const contrato     = jadlog_contrato ? `'${String(jadlog_contrato).replace(/'/g,"''")}'` : "NULL";
-    const senha        = jadlog_senha    ? `'${String(jadlog_senha).replace(/'/g,"''")}'`    : "NULL";
+    const localAtivo = body.venda_local_ativo !== undefined ? Boolean(body.venda_local_ativo) : atual.venda_local_ativo;
+    const raio = body.raio_km !== undefined ? Math.min(Math.max(Number(body.raio_km) || 15, 1), 100) : atual.raio_km;
+    const nacionalAtivo = body.venda_nacional_ativo !== undefined ? Boolean(body.venda_nacional_ativo) : atual.venda_nacional_ativo;
 
-    const rows = await db.execute(`
-      INSERT INTO config_ecommerce_pdv (empresa_id, venda_local_ativo, raio_km, venda_nacional_ativo, jadlog_contrato, jadlog_senha)
-      VALUES (${empresaId}, ${localAtivo}, ${raio}, ${nacionalAtivo}, ${contrato}, ${senha})
+    let cepOrigem = atual.correios_cep_origem;
+    if (body.correios_cep_origem !== undefined) {
+      if (body.correios_cep_origem === null || String(body.correios_cep_origem).trim() === "") {
+        cepOrigem = null;
+      } else {
+        const cep = normalizarCep(body.correios_cep_origem);
+        if (!cep || !ufDoCep(cep)) return res.status(400).json({ error: "cep_invalido", message: "CEP de origem inválido" });
+        cepOrigem = cep;
+      }
+    }
+    const tabela = body.correios_tabela !== undefined ? normalizarTabela(body.correios_tabela) : atual.correios_tabela;
+    const pesoPadrao = body.correios_peso_padrao_kg !== undefined
+      ? Math.min(Math.max(Number(body.correios_peso_padrao_kg) || 0.5, 0.01), PESO_MAXIMO_KG)
+      : atual.correios_peso_padrao_kg;
+
+    const rows = await db.execute(sql`
+      INSERT INTO config_ecommerce_pdv
+        (empresa_id, venda_local_ativo, raio_km, venda_nacional_ativo, correios_cep_origem, correios_tabela, correios_peso_padrao_kg)
+      VALUES
+        (${empresaId}, ${localAtivo}, ${raio}, ${nacionalAtivo}, ${cepOrigem}, ${JSON.stringify(tabela)}::jsonb, ${pesoPadrao})
       ON CONFLICT (empresa_id) DO UPDATE SET
-        venda_local_ativo    = EXCLUDED.venda_local_ativo,
-        raio_km              = EXCLUDED.raio_km,
-        venda_nacional_ativo = EXCLUDED.venda_nacional_ativo,
-        jadlog_contrato      = EXCLUDED.jadlog_contrato,
-        jadlog_senha         = EXCLUDED.jadlog_senha
+        venda_local_ativo       = EXCLUDED.venda_local_ativo,
+        raio_km                 = EXCLUDED.raio_km,
+        venda_nacional_ativo    = EXCLUDED.venda_nacional_ativo,
+        correios_cep_origem     = EXCLUDED.correios_cep_origem,
+        correios_tabela         = EXCLUDED.correios_tabela,
+        correios_peso_padrao_kg = EXCLUDED.correios_peso_padrao_kg
       RETURNING *
     `);
-    return res.json(rows.rows[0]);
+    return res.json(ecommerceConfigResponse(rows.rows[0]));
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
