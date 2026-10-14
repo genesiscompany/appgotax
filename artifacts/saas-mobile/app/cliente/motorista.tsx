@@ -1,3 +1,4 @@
+import { usePushNotifications } from "@/hooks/usePushNotifications";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View, Text, StyleSheet, Pressable, useColorScheme, Platform,
@@ -89,6 +90,7 @@ const LOCATIONS = {
 };
 
 export default function ClienteMotorista() {
+  usePushNotifications("motorista");
   const insets = useSafeAreaInsets();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";

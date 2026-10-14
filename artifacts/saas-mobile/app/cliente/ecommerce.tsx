@@ -1,3 +1,4 @@
+import { usePushNotifications } from "@/hooks/usePushNotifications";
 import React, { useState, useEffect, useRef } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, useColorScheme, Platform, Alert, ActivityIndicator, Image, TextInput } from "react-native";
 import PixPagamento from "@/components/PixPagamento";
@@ -68,6 +69,7 @@ type PlaceSuggestion = {
 };
 
 export default function ClienteEcommerce() {
+  usePushNotifications("ecommerce");
   const insets = useSafeAreaInsets();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";

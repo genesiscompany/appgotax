@@ -1,3 +1,4 @@
+import { usePushNotifications } from "@/hooks/usePushNotifications";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, useColorScheme, TextInput,
@@ -87,6 +88,7 @@ function routeDistanceKm(coords: Coords[]): number {
 }
 
 export default function ClienteEntrega() {
+  usePushNotifications("entrega");
   const { requireAuth } = useAuthGate("/cliente/entrega");
   const { customer } = useCustomerAuth();
   const insets = useSafeAreaInsets();

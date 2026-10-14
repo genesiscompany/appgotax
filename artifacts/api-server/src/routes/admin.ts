@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { db } from "@workspace/db";
 import { usuariosTable, empresasTable } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 import { ensurePushTables } from "../lib/ensurePushTables";
 
@@ -926,6 +926,8 @@ router.post("/push/send", requireAdmin, async (req, res) => {
     for (let i = 0; i < tokens.length; i += 100) chunks.push(tokens.slice(i, i + 100));
 
     let enviados = 0;
+    const erros: Record<string, number> = {};
+    const tokensInvalidos: string[] = [];
     for (const chunk of chunks) {
       const messages = chunk.map(token => ({
         to: token,
@@ -941,15 +943,34 @@ router.post("/push/send", requireAdmin, async (req, res) => {
           headers: { "Content-Type": "application/json", "Accept": "application/json", "Accept-Encoding": "gzip, deflate" },
           body: JSON.stringify(messages),
         });
-        if (r.ok) {
-          const result = await r.json() as { data?: { status: string }[] };
-          if (result?.data && Array.isArray(result.data)) {
-            enviados += result.data.filter((d: { status: string }) => d.status === "ok").length;
-          } else {
-            enviados += chunk.length;
-          }
+        const result = await r.json().catch(() => null) as {
+          data?: { status: string; message?: string; details?: { error?: string } }[];
+          errors?: { code?: string; message?: string }[];
+        } | null;
+        if (!r.ok || !Array.isArray(result?.data)) {
+          const code = result?.errors?.[0]?.code || `HTTP_${r.status}`;
+          erros[code] = (erros[code] ?? 0) + chunk.length;
+          console.error("Expo push error:", r.status, JSON.stringify(result?.errors ?? result));
+          continue;
         }
-      } catch (e) { console.error("Expo push error:", e); }
+        result!.data!.forEach((ticket, idx) => {
+          if (ticket.status === "ok") { enviados++; return; }
+          const code = ticket.details?.error || "Erro";
+          erros[code] = (erros[code] ?? 0) + 1;
+          if (code === "DeviceNotRegistered") tokensInvalidos.push(chunk[idx]);
+          console.error("Expo push ticket error:", code, ticket.message);
+        });
+      } catch (e) {
+        erros.FalhaDeRede = (erros.FalhaDeRede ?? 0) + chunk.length;
+        console.error("Expo push error:", e);
+      }
+    }
+
+    if (tokensInvalidos.length > 0) {
+      await db.execute(sql`
+        UPDATE push_tokens SET ativo = false, atualizado_em = NOW()
+        WHERE token IN (${sql.join(tokensInvalidos.map(t => sql`${t}`), sql`, `)})
+      `).catch((e) => { console.error("push_tokens deactivate error:", e); });
     }
 
     await db.execute(`
@@ -957,7 +978,7 @@ router.post("/push/send", requireAdmin, async (req, res) => {
       VALUES ('${titulo.replace(/'/g, "''")}', '${mensagem.replace(/'/g, "''")}', '${modulo || "todos"}', ${tokens.length}, ${enviados}, NOW())
     `).catch((e) => { console.error("push_historico insert error:", e); });
 
-    return res.json({ ok: true, tokens: tokens.length, enviado: enviados });
+    return res.json({ ok: true, tokens: tokens.length, enviado: enviados, erros });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 

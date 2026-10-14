@@ -31,6 +31,14 @@ async function getExpoPushToken(): Promise<string | null> {
         shouldShowList: true,
       }),
     });
+    // Android 13+: o canal precisa existir antes de pedir permissão/obter o token.
+    if (Platform.OS === "android") {
+      await Notifications.setNotificationChannelAsync("default", {
+        name: "Avisos GoTaxi",
+        importance: Notifications.AndroidImportance.HIGH,
+        sound: "default",
+      });
+    }
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
     if (existingStatus !== "granted") {

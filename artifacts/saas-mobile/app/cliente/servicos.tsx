@@ -1,3 +1,4 @@
+import { usePushNotifications } from "@/hooks/usePushNotifications";
 import React, { useState, useEffect } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, useColorScheme, Platform, ActivityIndicator, Alert } from "react-native";
 import SegmentoBottomNav, { SEGMENTO_NAV_HEIGHT } from "@/components/SegmentoBottomNav";
@@ -37,6 +38,7 @@ type Catalogo = {
 };
 
 export default function ClienteServicos() {
+  usePushNotifications("servicos");
   const insets = useSafeAreaInsets();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";

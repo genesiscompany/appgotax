@@ -1,3 +1,4 @@
+import { usePushNotifications } from "@/hooks/usePushNotifications";
 import React, { useState, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable,
@@ -92,6 +93,7 @@ const makeUid = (produtoId: number, tamanhoNome: string, extraIds: number[], gru
 
 // ── Main Screen ───────────────────────────────────────────────────────────────
 export default function ClienteFood() {
+  usePushNotifications("food");
   const insets = useSafeAreaInsets();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";

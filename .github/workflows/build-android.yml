@@ -73,11 +73,25 @@ jobs:
           echo "=== app.json ===" && node -e "const a=require('./app.json'); console.log('version:', a.expo.version, '| versionCode:', a.expo.android.versionCode)"
           echo "=== eas.json ===" && cat eas.json
 
+      - name: Gerar google-services.json (push notifications)
+        env:
+          GOOGLE_SERVICES_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_CONTENT" ]; then
+            # Fora do projeto: o arquivo está no .gitignore e não entraria no build local do EAS
+            GS_FILE="$RUNNER_TEMP/google-services.json"
+            printf '%s' "$GOOGLE_SERVICES_JSON_CONTENT" > "$GS_FILE"
+            node -e "const j=require(process.argv[1]); const ok=(j.client||[]).some(c=>c.client_info?.android_client_info?.package_name==='br.gotaxi.app'); if(!ok){console.error('google-services.json não tem o app br.gotaxi.app'); process.exit(1)} console.log('google-services.json OK')" "$GS_FILE"
+            echo "GOOGLE_SERVICES_JSON=$GS_FILE" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Secret GOOGLE_SERVICES_JSON não configurado — push notifications não vão funcionar no Android."
+          fi
+
       - name: Build Android (local — sem consumir cota EAS)
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           EAS_NO_VCS: '1'
-          EXPO_PUBLIC_DOMAIN: 'api.gotaxi.com.br'
+          EXPO_PUBLIC_DOMAIN: 'gotaxi.com.br'
           EXPO_PUBLIC_GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
         run: |
           eas build \

@@ -1,3 +1,4 @@
+import { usePushNotifications } from "@/hooks/usePushNotifications";
 import React, { useState, useEffect, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, useColorScheme,
@@ -130,6 +131,7 @@ function StatusBadge({ status, colors }: { status: string; colors: any }) {
 }
 
 export default function ClientePassagens() {
+  usePushNotifications("passagens");
   const insets = useSafeAreaInsets();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";

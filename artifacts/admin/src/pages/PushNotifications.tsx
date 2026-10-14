@@ -22,7 +22,7 @@ export default function PushNotifications() {
   const [mensagem, setMensagem] = useState("");
   const [moduloSel, setModuloSel] = useState("todos");
   const [enviando, setEnviando] = useState(false);
-  const [resultado, setResultado] = useState<{ ok: boolean; tokens: number; enviado: number } | null>(null);
+  const [resultado, setResultado] = useState<{ ok: boolean; tokens: number; enviado: number; erros?: Record<string, number> } | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
   const [historico, setHistorico] = useState<Historico[]>([]);
   const [loadingStats, setLoadingStats] = useState(true);
@@ -187,7 +187,19 @@ export default function PushNotifications() {
           {resultado && (
             <div className={`rounded-lg p-3 text-sm flex items-center gap-2 ${resultado.ok ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
               {resultado.ok ? (
-                <>✅ Enviado para <strong>{resultado.enviado}</strong> dispositivo{resultado.enviado !== 1 ? "s" : ""} de <strong>{resultado.tokens}</strong> registrado{resultado.tokens !== 1 ? "s" : ""}</>
+                <div className="space-y-1">
+                  <p>{resultado.enviado > 0 ? "✅" : "⚠️"} Enviado para <strong>{resultado.enviado}</strong> dispositivo{resultado.enviado !== 1 ? "s" : ""} de <strong>{resultado.tokens}</strong> registrado{resultado.tokens !== 1 ? "s" : ""}</p>
+                  {resultado.tokens === 0 && (
+                    <p className="text-xs">Nenhum celular registrado para este público. O app precisa da versão com Firebase (google-services.json) e o usuário precisa permitir notificações.</p>
+                  )}
+                  {resultado.erros && Object.entries(resultado.erros).map(([code, n]) => (
+                    <p key={code} className="text-xs text-red-700">
+                      {n}× {code}
+                      {code === "InvalidCredentials" && " — falta enviar a chave FCM V1 (conta de serviço do Firebase) em expo.dev → Credentials."}
+                      {code === "DeviceNotRegistered" && " — app desinstalado ou notificações desativadas; dispositivo removido da lista."}
+                    </p>
+                  ))}
+                </div>
               ) : (
                 <>❌ Erro ao enviar a notificação. Tente novamente.</>
               )}
