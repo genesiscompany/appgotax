@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import { customerIdFromRequest } from "../lib/customerToken";
 import { roadRoute } from "../lib/roadDistance";
+import { ensureDestinoMotorista, destinoCompativelSql } from "../lib/motoristaDestino";
 
 const router: IRouter = Router();
 
@@ -86,6 +87,7 @@ router.post("/estimativa", async (req, res) => {
     const route = await roadRoute(coords[0], coords[1], coords[2], coords[3]);
     const tripKm = Math.max(0.1, Math.round(route.km * 100) / 100);
 
+    await ensureDestinoMotorista();
     const nearestRows = await db.execute(`
       SELECT (6371 * acos(LEAST(1.0,
         cos(radians(${coords[0]})) * cos(radians(ma.lat)) *
@@ -101,6 +103,7 @@ router.post("/estimativa", async (req, res) => {
           OR ('${paymentSource}' IN ('mercado_pago', 'wallet') AND ma.aceita_pagamento_app = true)
         )
         AND EXISTS (SELECT 1 FROM motorista_categorias mc WHERE mc.motorista_id = ma.id AND mc.categoria_nome = '${esc(categoria)}')
+        AND ${destinoCompativelSql(coords[2], coords[3])}
       ORDER BY distancia_motorista_km ASC LIMIT 1
     `);
     const pickupKm = Math.max(0, Number((nearestRows.rows[0] as any)?.distancia_motorista_km ?? 0));
@@ -161,6 +164,7 @@ router.post("/solicitar", async (req, res) => {
     let pickupKm = 0;
     let selectedDriver: any = null;
     if (validCoords && requestedCategory) {
+      await ensureDestinoMotorista();
       const nearestRows = await db.execute(`
         SELECT ma.id, ma.nome, ma.veiculo_modelo, ma.veiculo_cor, ma.veiculo_placa,
           ma.avaliacao_media, ma.lat, ma.lng, (
@@ -184,6 +188,7 @@ router.post("/solicitar", async (req, res) => {
             WHERE mc.motorista_id = ma.id
               AND mc.categoria_nome = '${esc(requestedCategory)}'
           )
+          AND ${destinoCompativelSql(coords[2], coords[3])}
         ORDER BY distancia_motorista_km ASC
         LIMIT 1
       `);

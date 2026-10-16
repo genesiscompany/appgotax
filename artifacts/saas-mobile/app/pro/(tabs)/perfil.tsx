@@ -5,7 +5,8 @@ import {
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
+import DefinirDestino, { useDestino } from "@/components/DefinirDestino";
 import * as ImagePicker from "expo-image-picker";
 import QRCode from "react-native-qrcode-svg";
 import { useProAuth, PRO_COLORS, PRO_LABELS, PRO_ICONS } from "@/context/ProAuthContext";
@@ -381,9 +382,35 @@ function buildPixImgUrl(pixImagem: string, apiBase: string) {
   return `${base}${pixImagem}`;
 }
 
+type TelaMenu = "documentos" | "dados" | "recebimentos" | "pix" | "veiculo" | "indicacao" | "destino";
+
+const TELA_TITULOS: Record<TelaMenu, string> = {
+  documentos: "Documentos",
+  dados: "Dados pessoais",
+  recebimentos: "Recebimentos",
+  pix: "PIX",
+  veiculo: "Veículo",
+  indicacao: "Indicação",
+  destino: "Definir destino",
+};
+
+function formatBRL(v: number | string | null | undefined) {
+  return `R$ ${Number(v || 0).toFixed(2).replace(".", ",")}`;
+}
+
+function formatData(iso?: string) {
+  if (!iso) return "–";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "–";
+  return `${d.getDate().toString().padStart(2, "0")}/${(d.getMonth() + 1).toString().padStart(2, "0")}/${d.getFullYear()}`;
+}
+
 export default function ProPerfil() {
   const { proUser, logout, refreshPerfil, updateLocal } = useProAuth();
   const [editando, setEditando] = useState(false);
+  const [tela, setTela] = useState<TelaMenu | null>(null);
+  const { info: destinoInfo, setInfo: setDestinoInfo, carregar: carregarDestino } = useDestino(proUser?.token);
+  useFocusEffect(useCallback(() => { carregarDestino(); }, [carregarDestino]));
   const [salvando, setSalvando] = useState(false);
   const [veiculoModal, setVeiculoModal] = useState(false);
   const [pinModal, setPinModal] = useState(false);
@@ -652,6 +679,50 @@ export default function ProPerfil() {
     { label: "Estado (UF)", key: "estado" as const },
   ];
 
+  const abrirTela = (t: TelaMenu, editar = false) => {
+    setEditando(t === "dados" && editar);
+    setTela(t);
+  };
+  const fecharTela = () => {
+    setTela(null);
+    setEditando(false);
+    setEditandoPix(false);
+  };
+
+  const docsAprovados = docs.filter(d => d.status === "aprovado").length;
+  const docsAlerta = docs.some(d => d.status === "rejeitado" || d.status === "pendente" || !d.status);
+  const veiculoResumo = [proUser.veiculo_modelo, proUser.veiculo_placa].filter(Boolean).join(" · ");
+
+  const menuItens: { key: string; icon: string; title: string; subtitle?: string; alerta?: boolean; onPress: () => void }[] = [
+    {
+      key: "documentos", icon: "📄", title: "Documentos",
+      subtitle: docsAlerta ? `⚠️ ${docs.length - docsAprovados} pendente(s)` : `✓ ${docsAprovados} aprovados`,
+      alerta: docsAlerta, onPress: () => abrirTela("documentos"),
+    },
+    { key: "dados", icon: "👤", title: "Dados pessoais", subtitle: "Nome, e-mail, telefone, CPF e cidade", onPress: () => abrirTela("dados") },
+    {
+      key: "recebimentos", icon: "💳", title: "Recebimentos",
+      subtitle: mpConnection.connected ? "Mercado Pago conectado" : "Mercado Pago não conectado",
+      onPress: () => abrirTela("recebimentos"),
+    },
+    {
+      key: "pix", icon: "💸", title: "PIX",
+      subtitle: proUser.pix_chave || proUser.pix_imagem_url ? "Chave e QR Code" : "⚠️ Cadastre sua chave PIX",
+      alerta: !proUser.pix_chave && !proUser.pix_imagem_url, onPress: () => abrirTela("pix"),
+    },
+    {
+      key: "veiculo", icon: proUser.tipo_profissional === "motorista" ? "🚗" : "🛵", title: "Veículo",
+      subtitle: veiculoResumo || "⚠️ Cadastre seu veículo", alerta: !veiculoResumo, onPress: () => abrirTela("veiculo"),
+    },
+    { key: "indicacao", icon: "🔗", title: "Indicação", subtitle: "Seu link para indicar amigos", onPress: () => abrirTela("indicacao") },
+    { key: "pin", icon: "🔐", title: "Alterar PIN", subtitle: "PIN de acesso ao app", onPress: () => setPinModal(true) },
+    {
+      key: "destino", icon: "📍", title: "Definir destino",
+      subtitle: destinoInfo?.ativo ? `Indo para: ${destinoInfo.endereco ?? ""}` : "Desligado",
+      onPress: () => abrirTela("destino"),
+    },
+  ];
+
   return (
     <SafeAreaView style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor="#0D0D0D" />
@@ -669,12 +740,73 @@ export default function ProPerfil() {
               <Text style={styles.avaliacao}>★ {Number(proUser.avaliacao_media).toFixed(1)} · {proUser.total_corridas} serviços</Text>
             )}
           </View>
-          <TouchableOpacity style={[styles.editBtn, { borderColor: cor }]} onPress={() => setEditando(!editando)}>
-            <Text style={[styles.editBtnTxt, { color: cor }]}>{editando ? "Cancelar" : "Editar"}</Text>
+          <TouchableOpacity style={[styles.editBtn, { borderColor: cor }]} onPress={() => abrirTela("dados", true)}>
+            <Text style={[styles.editBtnTxt, { color: cor }]}>Editar</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Documentos */}
+        {/* Resumo da conta */}
+        <View style={styles.resumoCard}>
+          <Text style={styles.resumoLabel}>Saldo disponível</Text>
+          <Text style={[styles.resumoSaldo, { color: cor }]}>{formatBRL(proUser.saldo)}</Text>
+          <View style={styles.resumoRow}>
+            <View style={styles.resumoItem}>
+              <Text style={styles.resumoItemLabel}>Repasse GoTaxi</Text>
+              <Text style={styles.resumoItemVal}>{proUser.percentual_repasse || 3}%</Text>
+            </View>
+            <View style={styles.resumoItem}>
+              <Text style={styles.resumoItemLabel}>Membro desde</Text>
+              <Text style={styles.resumoItemVal}>{formatData(proUser.criado_em)}</Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Menu */}
+        <View style={styles.menuList}>
+          {menuItens.map((item, i) => (
+            <TouchableOpacity
+              key={item.key}
+              style={[styles.menuItem, i === menuItens.length - 1 && { borderBottomWidth: 0 }]}
+              onPress={item.onPress}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.menuIcon}>{item.icon}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.menuTitle}>{item.title}</Text>
+                {item.subtitle ? (
+                  <Text style={[styles.menuSubtitle, item.alerta && { color: "#F59E0B" }]} numberOfLines={1}>{item.subtitle}</Text>
+                ) : null}
+              </View>
+              <Text style={styles.menuChevron}>›</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+          <Text style={styles.logoutTxt}>Sair da conta</Text>
+        </TouchableOpacity>
+
+      </ScrollView>
+
+      {/* Tela de cada item do Menu */}
+      <Modal visible={tela !== null} animationType="slide" onRequestClose={fecharTela}>
+        <SafeAreaView style={styles.root}>
+          <View style={styles.telaHeader}>
+            <TouchableOpacity onPress={fecharTela} style={styles.telaVoltar} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <Text style={[styles.telaVoltarTxt, { color: cor }]}>‹ Voltar</Text>
+            </TouchableOpacity>
+            <Text style={styles.telaTitulo} numberOfLines={1}>{tela ? TELA_TITULOS[tela] : ""}</Text>
+            {tela === "dados" ? (
+              <TouchableOpacity onPress={() => setEditando(v => !v)} style={[styles.telaVoltar, { alignItems: "flex-end" }]}>
+                <Text style={[styles.telaVoltarTxt, { color: cor }]}>{editando ? "Cancelar" : "Editar"}</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.telaVoltar} />
+            )}
+          </View>
+          <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
+            <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+              {tela === "documentos" && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>DOCUMENTOS</Text>
           {docs.map(d => {
@@ -687,8 +819,8 @@ export default function ProPerfil() {
             );
           })}
         </View>
-
-        {/* Dados Pessoais */}
+              )}
+              {tela === "dados" && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>DADOS PESSOAIS</Text>
           {editando ? (
@@ -727,8 +859,8 @@ export default function ProPerfil() {
             </>
           )}
         </View>
-
-        {/* Recebimentos */}
+              )}
+              {tela === "recebimentos" && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>RECEBIMENTOS</Text>
           <View style={styles.infoRow}>
@@ -766,8 +898,8 @@ export default function ProPerfil() {
             />
           </View>
         </View>
-
-        {/* PIX */}
+              )}
+              {tela === "pix" && (
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>💸 PIX</Text>
@@ -885,8 +1017,8 @@ export default function ProPerfil() {
             </>
           )}
         </View>
-
-        {/* Veículo */}
+              )}
+              {tela === "veiculo" && (
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>VEÍCULO</Text>
@@ -926,43 +1058,29 @@ export default function ProPerfil() {
             </View>
           )}
         </View>
+              )}
+              {tela === "destino" && !!proUser.token && (
+                <DefinirDestino token={proUser.token} cor={cor} onChange={setDestinoInfo} />
+              )}
+              {tela === "indicacao" && (
+                proUser.codigo_referral ? (
+                  <ReferralCard codigo={proUser.codigo_referral} cor={cor} />
+                ) : (
+                  <Text style={styles.vazioTxt}>Seu link de indicação ainda não está disponível.</Text>
+                )
+              )}
+            </ScrollView>
+          </KeyboardAvoidingView>
 
-        {/* Conta */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>CONTA</Text>
-          {[
-            { label: "Repasse GoTaxi", val: `${proUser.percentual_repasse || 3}%` },
-            { label: "Saldo disponível", val: `R$ ${Number(proUser.saldo || 0).toFixed(2).replace(".", ",")}` },
-            { label: "Membro desde", val: proUser.criado_em ? (() => { const d = new Date(proUser.criado_em); return `${d.getDate().toString().padStart(2,"0")}/${(d.getMonth()+1).toString().padStart(2,"0")}/${d.getFullYear()}`; })() : "–" },
-          ].map(r => (
-            <View key={r.label} style={styles.infoRow}>
-              <Text style={styles.infoLabel}>{r.label}</Text>
-              <Text style={styles.infoVal}>{r.val}</Text>
-            </View>
-          ))}
-        </View>
+          <VeiculoModal
+            visible={veiculoModal}
+            proUser={proUser}
+            onClose={() => setVeiculoModal(false)}
+            onSave={salvarVeiculo}
+          />
+        </SafeAreaView>
+      </Modal>
 
-        {/* Link de Indicação */}
-        {proUser.codigo_referral ? (
-          <ReferralCard codigo={proUser.codigo_referral} cor={cor} />
-        ) : null}
-
-        <TouchableOpacity style={styles.alterarPinBtn} onPress={() => setPinModal(true)}>
-          <Text style={styles.alterarPinTxt}>🔐 Alterar PIN de acesso</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-          <Text style={styles.logoutTxt}>Sair da conta</Text>
-        </TouchableOpacity>
-
-      </ScrollView>
-
-      <VeiculoModal
-        visible={veiculoModal}
-        proUser={proUser}
-        onClose={() => setVeiculoModal(false)}
-        onSave={salvarVeiculo}
-      />
 
       {/* Modal Alterar PIN */}
       <Modal visible={pinModal} transparent animationType="slide" onRequestClose={() => setPinModal(false)}>
@@ -1068,6 +1186,24 @@ const styles = StyleSheet.create({
   saveBtnTxt: { fontSize: 15, fontWeight: "800", color: "#000" },
   alterarPinBtn: { backgroundColor: "#FF6B0015", borderWidth: 1.5, borderColor: "#FF6B0040", borderRadius: 14, paddingVertical: 14, alignItems: "center", marginTop: 4 },
   alterarPinTxt: { fontSize: 14, fontWeight: "700", color: "#FF8C00" },
+  resumoCard: { backgroundColor: "#1A1A1A", borderRadius: 16, padding: 16, marginBottom: 12 },
+  resumoLabel: { fontSize: 12, color: "#8896B0" },
+  resumoSaldo: { fontSize: 26, fontWeight: "900", marginTop: 2 },
+  resumoRow: { flexDirection: "row", gap: 12, marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: "#222" },
+  resumoItem: { flex: 1 },
+  resumoItemLabel: { fontSize: 11, color: "#666" },
+  resumoItemVal: { fontSize: 14, color: "#FFF", fontWeight: "700", marginTop: 2 },
+  menuList: { backgroundColor: "#1A1A1A", borderRadius: 16, paddingHorizontal: 4, marginBottom: 12 },
+  menuItem: { flexDirection: "row", alignItems: "center", gap: 14, paddingHorizontal: 12, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: "#222" },
+  menuIcon: { fontSize: 20, width: 28, textAlign: "center" },
+  menuTitle: { fontSize: 15, color: "#FFF", fontWeight: "700" },
+  menuSubtitle: { fontSize: 12, color: "#777", marginTop: 2 },
+  menuChevron: { fontSize: 24, color: "#444", fontWeight: "300" },
+  telaHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#1A1A1A" },
+  telaVoltar: { minWidth: 76 },
+  telaVoltarTxt: { fontSize: 15, fontWeight: "700" },
+  telaTitulo: { flex: 1, textAlign: "center", fontSize: 16, fontWeight: "800", color: "#FFF" },
+  vazioTxt: { fontSize: 13, color: "#666", textAlign: "center", marginTop: 24 },
   logoutBtn: { backgroundColor: "#1A1A1A", borderRadius: 14, paddingVertical: 16, alignItems: "center", marginTop: 4 },
   logoutTxt: { fontSize: 15, fontWeight: "600", color: "#EF4444" },
   pinOverlay: { flex: 1, backgroundColor: "#000000AA", justifyContent: "flex-end" },

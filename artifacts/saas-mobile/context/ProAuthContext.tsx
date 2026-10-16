@@ -129,11 +129,18 @@ export function ProAuthProvider({ children }: { children: React.ReactNode }) {
       }
       permissionWarnedRef.current = false;
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      await fetch(`${API_BASE}/motorista-app/localizacao`, {
+      const locRes = await fetch(`${API_BASE}/motorista-app/localizacao`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${user.token}` },
         body: JSON.stringify({ lat: loc.coords.latitude, lng: loc.coords.longitude, online: true }),
       });
+      const locData = await locRes.json().catch(() => null);
+      if (locData?.destino_chegou) {
+        Alert.alert(
+          "Você chegou ao destino",
+          `O modo destino foi desligado${locData.destino_endereco ? ` (${locData.destino_endereco})` : ""}. Você volta a receber corridas para qualquer direção.`,
+        );
+      }
     } catch {}
   }, []);
 

@@ -284,7 +284,7 @@ export default function ProTabsLayout() {
         <Tabs.Screen name="ganhos"
           options={{ tabBarIcon: ({ color }) => <TabIcon icon="💰" label="Ganhos" color={color} /> }} />
         <Tabs.Screen name="perfil"
-          options={{ tabBarIcon: ({ color }) => <TabIcon icon="👤" label="Perfil" color={color} /> }} />
+          options={{ tabBarIcon: ({ color }) => <TabIcon icon="☰" label="Menu" color={color} /> }} />
       </Tabs>
 
       <RideRequestOverlay

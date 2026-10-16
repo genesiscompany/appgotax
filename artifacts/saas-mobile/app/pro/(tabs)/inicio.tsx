@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   RefreshControl, StatusBar, Animated, Pressable,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
+import { useDestino } from "@/components/DefinirDestino";
 import { useProAuth, PRO_COLORS, PRO_LABELS, PRO_ICONS, PRO_JOB } from "@/context/ProAuthContext";
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
@@ -23,6 +24,8 @@ export default function ProInicio() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const glowAnim = useRef(new Animated.Value(0)).current;
   const entregasPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const { info: destino, carregar: carregarDestino, desligar: desligarDestino } = useDestino(proUser?.token);
+  useFocusEffect(useCallback(() => { carregarDestino(); }, [carregarDestino]));
 
   const tipo = proUser?.tipo_profissional || "motorista";
   const cor = PRO_COLORS[tipo];
@@ -123,6 +126,19 @@ export default function ProInicio() {
             </View>
           )}
         </View>
+
+        {/* Modo destino ligado */}
+        {destino?.ativo && (
+          <View style={[styles.destinoCard, { borderColor: cor }]}>
+            <TouchableOpacity style={{ flex: 1 }} activeOpacity={0.8} onPress={() => router.push("/pro/perfil" as any)}>
+              <Text style={styles.destinoLabel}>📍 Indo para</Text>
+              <Text style={styles.destinoEnd} numberOfLines={1}>{destino.endereco}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={desligarDestino} style={styles.destinoOff}>
+              <Text style={styles.destinoOffTxt}>Desligar</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Card de entregas PDV — só aparece quando há atribuições */}
         {pdvCount > 0 && (
@@ -256,6 +272,11 @@ export default function ProInicio() {
 }
 
 const styles = StyleSheet.create({
+  destinoCard: { flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: "#1A1A1A", borderRadius: 14, borderWidth: 1, padding: 12, marginBottom: 12 },
+  destinoLabel: { fontSize: 12, color: "#8896B0", fontWeight: "700" },
+  destinoEnd: { fontSize: 14, color: "#FFF", fontWeight: "800", marginTop: 2 },
+  destinoOff: { borderWidth: 1, borderColor: "#EF4444", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
+  destinoOffTxt: { color: "#EF4444", fontWeight: "800", fontSize: 13 },
   root: { flex: 1, backgroundColor: "#0D0D0D" },
   scroll: { padding: 20, gap: 16, paddingBottom: 30 },
   greeting: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },

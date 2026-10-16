@@ -1,5 +1,9 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
 import { db } from "@workspace/db";
+import {
+  ensureDestinoMotorista, coordenadaValida, distanciaKm, distanciaKmSql,
+  DESTINO_CHEGADA_KM, DESTINOS_SALVOS_MAX,
+} from "../lib/motoristaDestino";
 import { sql } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 import multer from "multer";
@@ -2184,8 +2188,138 @@ router.post("/localizacao", async (req: Request, res: Response) => {
           ultimo_ping = NOW()
       WHERE id = ${motoristaId}
     `);
-    return res.json({ ok: true });
+
+    // Modo destino desliga sozinho quando o motorista chega perto do destino
+    let destinoChegou: string | null = null;
+    try {
+      await ensureDestinoMotorista();
+      const chegou = await db.execute(`
+        UPDATE motoristas_app SET destino_ativo = false
+        WHERE id = ${Number(motoristaId)} AND destino_ativo = true
+          AND destino_lat IS NOT NULL AND destino_lng IS NOT NULL
+          AND ${distanciaKmSql("lat", "lng", "destino_lat", "destino_lng")} <= ${DESTINO_CHEGADA_KM}
+        RETURNING destino_endereco
+      `);
+      const row = chegou.rows[0] as any;
+      if (row) destinoChegou = String(row.destino_endereco || "");
+    } catch (err) { console.error("[destino] auto-desligar", err); }
+
+    return res.json(destinoChegou !== null
+      ? { ok: true, destino_chegou: true, destino_endereco: destinoChegou }
+      : { ok: true });
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
+});
+
+// ── Definir destino ───────────────────────────────────────────────────────────
+// Com o modo ligado, o motorista só recebe corridas que terminam mais perto do
+// destino dele do que ele está agora (ver lib/motoristaDestino). Sem limite de usos.
+async function destinoPayload(motoristaId: number) {
+  const r = await db.execute(sql`
+    SELECT destino_ativo, destino_endereco, destino_lat, destino_lng, destino_ativado_em
+    FROM motoristas_app WHERE id = ${motoristaId}
+  `);
+  const m = r.rows[0] as any;
+  if (!m) return null;
+  const salvos = await db.execute(sql`
+    SELECT id, nome, endereco, lat, lng FROM motorista_destinos_salvos
+    WHERE motorista_id = ${motoristaId} ORDER BY criado_em DESC, id DESC
+  `);
+  return {
+    ativo: !!m.destino_ativo,
+    endereco: m.destino_endereco ?? null,
+    lat: m.destino_lat != null ? Number(m.destino_lat) : null,
+    lng: m.destino_lng != null ? Number(m.destino_lng) : null,
+    ativado_em: m.destino_ativado_em ?? null,
+    salvos: (salvos.rows as any[]).map(s => ({
+      id: Number(s.id), nome: String(s.nome), endereco: String(s.endereco),
+      lat: Number(s.lat), lng: Number(s.lng),
+    })),
+  };
+}
+
+router.get("/destino", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "invalid_token" });
+  try {
+    await ensureDestinoMotorista();
+    const payload = await destinoPayload(motoristaId);
+    if (!payload) return res.status(404).json({ error: "not_found" });
+    return res.json(payload);
+  } catch (err) { console.error("[destino] get", err); return res.status(500).json({ error: "server_error" }); }
+});
+
+router.put("/destino", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "invalid_token" });
+  try {
+    await ensureDestinoMotorista();
+    const { salvo_id, endereco, lat, lng, salvar_nome } = req.body ?? {};
+    let destino: { endereco: string; lat: number; lng: number };
+
+    if (salvo_id != null) {
+      const r = await db.execute(sql`
+        SELECT endereco, lat, lng FROM motorista_destinos_salvos
+        WHERE id = ${Number(salvo_id)} AND motorista_id = ${motoristaId}
+      `);
+      const s = r.rows[0] as any;
+      if (!s) return res.status(404).json({ error: "destino_nao_encontrado", message: "Destino salvo não encontrado." });
+      destino = { endereco: String(s.endereco), lat: Number(s.lat), lng: Number(s.lng) };
+    } else {
+      const end = String(endereco ?? "").trim();
+      if (end.length < 3 || end.length > 300 || !coordenadaValida(lat, lng)) {
+        return res.status(400).json({ error: "destino_invalido", message: "Escolha um endereço da lista para definir o destino." });
+      }
+      destino = { endereco: end, lat: Number(lat), lng: Number(lng) };
+    }
+
+    const pos = (await db.execute(sql`SELECT lat, lng FROM motoristas_app WHERE id = ${motoristaId}`)).rows[0] as any;
+    if (pos && coordenadaValida(pos.lat, pos.lng)
+      && distanciaKm(Number(pos.lat), Number(pos.lng), destino.lat, destino.lng) <= DESTINO_CHEGADA_KM) {
+      return res.status(422).json({ error: "ja_no_destino", message: `Você já está a menos de ${DESTINO_CHEGADA_KM} km desse destino.` });
+    }
+
+    const nome = String(salvar_nome ?? "").trim().slice(0, 60);
+    if (salvo_id == null && nome) {
+      const c = await db.execute(sql`SELECT COUNT(*)::int AS n FROM motorista_destinos_salvos WHERE motorista_id = ${motoristaId}`);
+      if (Number((c.rows[0] as any)?.n ?? 0) >= DESTINOS_SALVOS_MAX) {
+        return res.status(422).json({ error: "limite_salvos", message: `Você pode salvar até ${DESTINOS_SALVOS_MAX} destinos. Apague algum para salvar outro.` });
+      }
+      await db.execute(sql`
+        INSERT INTO motorista_destinos_salvos (motorista_id, nome, endereco, lat, lng)
+        VALUES (${motoristaId}, ${nome}, ${destino.endereco}, ${destino.lat}, ${destino.lng})
+      `);
+    }
+
+    await db.execute(sql`
+      UPDATE motoristas_app
+      SET destino_ativo = true, destino_endereco = ${destino.endereco},
+          destino_lat = ${destino.lat}, destino_lng = ${destino.lng}, destino_ativado_em = NOW()
+      WHERE id = ${motoristaId}
+    `);
+    return res.json(await destinoPayload(motoristaId));
+  } catch (err) { console.error("[destino] put", err); return res.status(500).json({ error: "server_error" }); }
+});
+
+router.delete("/destino", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "invalid_token" });
+  try {
+    await ensureDestinoMotorista();
+    await db.execute(sql`UPDATE motoristas_app SET destino_ativo = false WHERE id = ${motoristaId}`);
+    return res.json(await destinoPayload(motoristaId));
+  } catch (err) { console.error("[destino] delete", err); return res.status(500).json({ error: "server_error" }); }
+});
+
+router.delete("/destino/salvos/:id", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "invalid_token" });
+  try {
+    await ensureDestinoMotorista();
+    await db.execute(sql`
+      DELETE FROM motorista_destinos_salvos WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId}
+    `);
+    return res.json(await destinoPayload(motoristaId));
+  } catch (err) { console.error("[destino] delete salvo", err); return res.status(500).json({ error: "server_error" }); }
 });
 
 // ── Motivos de cancelamento ────────────────────────────────────────────────────
