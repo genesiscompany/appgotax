@@ -461,7 +461,7 @@ export default function ProPerfil() {
   const [mpConnection, setMpConnection] = useState<{ connected: boolean; status: string }>({ connected: false, status: "disconnected" });
   const [mpLoading, setMpLoading] = useState(false);
 
-  useEffect(() => {
+  const resetForm = useCallback(() => {
     setForm({
       nome: proUser?.nome || "",
       email: proUser?.email || "",
@@ -471,6 +471,8 @@ export default function ProPerfil() {
     setPixTipo(proUser?.pix_tipo || "cpf");
     setPixChave(proUser?.pix_chave || "");
   }, [proUser]);
+
+  useEffect(() => { resetForm(); }, [resetForm]);
 
   const refreshMercadoPago = useCallback(async () => {
     if (!proUser?.token) return;
@@ -680,6 +682,7 @@ export default function ProPerfil() {
   ];
 
   const abrirTela = (t: TelaMenu, editar = false) => {
+    resetForm();
     setEditando(t === "dados" && editar);
     setTela(t);
   };
@@ -687,6 +690,7 @@ export default function ProPerfil() {
     setTela(null);
     setEditando(false);
     setEditandoPix(false);
+    resetForm();
   };
 
   const docsAprovados = docs.filter(d => d.status === "aprovado").length;
@@ -797,7 +801,7 @@ export default function ProPerfil() {
             </TouchableOpacity>
             <Text style={styles.telaTitulo} numberOfLines={1}>{tela ? TELA_TITULOS[tela] : ""}</Text>
             {tela === "dados" ? (
-              <TouchableOpacity onPress={() => setEditando(v => !v)} style={[styles.telaVoltar, { alignItems: "flex-end" }]}>
+              <TouchableOpacity onPress={() => { if (editando) resetForm(); setEditando(!editando); }} style={[styles.telaVoltar, { alignItems: "flex-end" }]}>
                 <Text style={[styles.telaVoltarTxt, { color: cor }]}>{editando ? "Cancelar" : "Editar"}</Text>
               </TouchableOpacity>
             ) : (
@@ -903,7 +907,7 @@ export default function ProPerfil() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>💸 PIX</Text>
-            <TouchableOpacity onPress={() => setEditandoPix(v => !v)}>
+            <TouchableOpacity onPress={() => { if (editandoPix) resetForm(); setEditandoPix(!editandoPix); }}>
               <Text style={[styles.editVeiculoBtnTxt, { color: cor }]}>
                 {editandoPix ? "Cancelar" : "Editar"}
               </Text>
