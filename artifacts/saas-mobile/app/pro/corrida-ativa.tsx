@@ -9,6 +9,7 @@ import * as Location from "expo-location";
 import * as Clipboard from "expo-clipboard";
 import QRCode from "react-native-qrcode-svg";
 import { router, useLocalSearchParams } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useProAuth } from "@/context/ProAuthContext";
 import { gerarPixQRCode } from "@/utils/pixQrCode";
 
@@ -78,6 +79,7 @@ export default function CorridaAtiva() {
   });
 
   const mapRef = useRef<MapView>(null);
+  const insets = useSafeAreaInsets();
   const locationSub = useRef<Location.LocationSubscription | null>(null);
 
   // ── Chat state ────────────────────────────────────────────────────────────────
@@ -355,7 +357,8 @@ export default function CorridaAtiva() {
               if (res.ok) {
                 router.replace("/pro/(tabs)/inicio");
               } else {
-                Alert.alert("Erro", "Não foi possível finalizar.");
+                const err = await res.json().catch(() => null);
+                Alert.alert("Erro", `Não foi possível finalizar.${err?.error ? ` (${err.error})` : ""}`);
               }
             } catch {
               Alert.alert("Erro", "Falha de conexão.");
@@ -470,7 +473,7 @@ export default function CorridaAtiva() {
       </View>
 
       {/* Bottom card */}
-      <View style={s.card}>
+      <View style={[s.card, { paddingBottom: 20 + insets.bottom }]}>
         {/* Ride info */}
         <View style={s.cardHeader}>
           <View style={[s.categoryBadge, { backgroundColor: fase === "embarque" ? "#1DB95420" : "#3B9EFF20" }]}>
@@ -619,7 +622,7 @@ export default function CorridaAtiva() {
       {/* ── Cancel Modal ───────────────────────────────────────────────── */}
       <Modal visible={cancelVisible} animationType="slide" transparent presentationStyle="overFullScreen">
         <View style={s.chatOverlay}>
-          <View style={s.cancelSheet}>
+          <View style={[s.cancelSheet, { paddingBottom: 20 + insets.bottom }]}>
             <View style={s.cancelHeader}>
               <Text style={s.cancelTitle}>⚠️ Cancelar corrida</Text>
               <Pressable onPress={() => setCancelVisible(false)} style={s.chatCloseBtn}>
@@ -911,7 +914,7 @@ const s = StyleSheet.create({
   chatSendTxt: { fontSize: 18, color: "#000", fontWeight: "900" },
 
   // Cancel link
-  cancelLink: { alignItems: "center", paddingVertical: 4 },
+  cancelLink: { alignItems: "center", paddingVertical: 10 },
   cancelLinkText: { fontSize: 13, color: "#EF4444", fontWeight: "600", textDecorationLine: "underline" },
 
   // Cancel modal

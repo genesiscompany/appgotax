@@ -8,6 +8,7 @@ import * as Location from "expo-location";
 import * as Clipboard from "expo-clipboard";
 import QRCode from "react-native-qrcode-svg";
 import { router, useLocalSearchParams } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useProAuth } from "@/context/ProAuthContext";
 import { gerarPixQRCode } from "@/utils/pixQrCode";
 
@@ -57,6 +58,7 @@ export default function EntregaAtivaScreen() {
     paymentStatus: string;
   }>();
 
+  const insets = useSafeAreaInsets();
   const [fase, setFase] = useState<Fase>((params.fase as Fase) || "coleta");
   const [myLocation, setMyLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [coletaCoords, setColetaCoords] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -188,7 +190,8 @@ export default function EntregaAtivaScreen() {
             if (res.ok) {
               router.replace("/pro/(tabs)/inicio");
             } else {
-              Alert.alert("Erro", "Não foi possível finalizar.");
+              const err = await res.json().catch(() => null);
+              Alert.alert("Erro", `Não foi possível finalizar.${err?.error ? ` (${err.error})` : ""}`);
             }
           } catch { Alert.alert("Erro", "Tente novamente."); }
           setActionLoading(false);
@@ -254,7 +257,7 @@ export default function EntregaAtivaScreen() {
       </View>
 
       {/* Bottom card */}
-      <View style={s.card}>
+      <View style={[s.card, { paddingBottom: 20 + insets.bottom }]}>
         {/* Phase indicator */}
         <View style={s.phaseRow}>
           <View style={[s.phaseDot, { backgroundColor: fase === "coleta" ? "#10B981" : "#333" }]} />

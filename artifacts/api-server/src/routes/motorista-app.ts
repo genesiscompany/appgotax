@@ -1233,13 +1233,18 @@ async function ensureCorridasTable() {
       cliente_nome VARCHAR(150),
       cliente_rating DECIMAL(3,2) DEFAULT 5.0,
       cliente_avaliacoes INTEGER DEFAULT 0,
-      status VARCHAR(20) DEFAULT 'aguardando',
+      status VARCHAR(30) DEFAULT 'aguardando',
       criado_em TIMESTAMP DEFAULT NOW(),
       expira_em TIMESTAMP DEFAULT NOW() + INTERVAL '30 seconds'
     )
   `));
   await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
   await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
+  await db.execute(sql.raw(`DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'corridas_solicitadas' AND column_name = 'status' AND character_maximum_length < 30) THEN
+      ALTER TABLE corridas_solicitadas ALTER COLUMN status TYPE VARCHAR(30);
+    END IF;
+  END $$`));
   await db.execute(sql.raw(`ALTER TABLE corridas ADD COLUMN IF NOT EXISTS customer_id INTEGER`));
 }
 
@@ -1728,13 +1733,18 @@ async function ensureEntregasTable() {
       cliente_rating DECIMAL(3,2) DEFAULT 5.0,
       cliente_avaliacoes INTEGER DEFAULT 0,
       descricao_item TEXT,
-      status VARCHAR(20) DEFAULT 'aguardando',
+      status VARCHAR(30) DEFAULT 'aguardando',
       criado_em TIMESTAMP DEFAULT NOW(),
       expira_em TIMESTAMP DEFAULT NOW() + INTERVAL '30 seconds'
     )
   `));
   await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
   await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
+  await db.execute(sql.raw(`DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'entregas_solicitadas' AND column_name = 'status' AND character_maximum_length < 30) THEN
+      ALTER TABLE entregas_solicitadas ALTER COLUMN status TYPE VARCHAR(30);
+    END IF;
+  END $$`));
   await db.execute(sql.raw(`ALTER TABLE entregas ADD COLUMN IF NOT EXISTS customer_id INTEGER`));
 }
 
