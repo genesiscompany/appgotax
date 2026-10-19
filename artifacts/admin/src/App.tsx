@@ -38,6 +38,7 @@ import PushNotifications from "@/pages/PushNotifications";
 import MotivosCancelamento from "@/pages/MotivosCancelamento";
 import Destaques from "@/pages/Destaques";
 import AfiliadosAdmin from "@/pages/AfiliadosAdmin";
+import Videos from "@/pages/Videos";
 import ConfiguracoesSistema from "@/pages/ConfiguracoesSistema";
 import CaronasConfig from "@/pages/CaronasConfig";
 import Suporte from "@/pages/Suporte";
@@ -96,6 +97,7 @@ function AppRoutes() {
         <Route path="/push" component={PushNotifications} />
         <Route path="/destaques" component={Destaques} />
         <Route path="/afiliados-admin" component={AfiliadosAdmin} />
+        <Route path="/videos" component={Videos} />
         <Route path="/configuracoes-sistema" component={ConfiguracoesSistema} />
         <Route path="/caronas-config" component={CaronasConfig} />
         <Route path="/suporte" component={Suporte} />

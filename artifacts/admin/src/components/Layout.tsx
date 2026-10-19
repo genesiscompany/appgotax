@@ -107,6 +107,7 @@ function getPageLabel(location: string): string {
   if (location.startsWith("/motivos-cancelamento")) return "Motoristas — Mot. Cancelamento";
   if (location.startsWith("/servicos")) return "Serviços";
   if (location.startsWith("/push")) return "Push Notifications";
+  if (location.startsWith("/videos")) return "Vídeos de Treinamento";
   if (location.startsWith("/destaques")) return "Destaques no App";
   if (location.startsWith("/modulos")) return "Módulos";
   if (location.startsWith("/caronas-config")) return "Viagens Compartilhadas";
@@ -551,6 +552,17 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 16H9m10 0h3v-3.15a1 1 0 0 0-.84-.99L16 11l-2.7-3.6a1 1 0 0 0-.8-.4H5.24a2 2 0 0 0-1.8 1.1l-.8 1.63A6 6 0 0 0 2 12.42V16h2"/><circle cx="6.5" cy="16.5" r="2.5"/><circle cx="16.5" cy="16.5" r="2.5"/></svg>
               </span>
               V. Compartilhadas
+            </a>
+          </Link>
+
+          {/* Vídeos de treinamento (Hub de Afiliados) */}
+          <Link href="/videos">
+            <a onClick={closeSidebar}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                location.startsWith("/videos") ? "bg-primary/15 text-primary" : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+              }`}>
+              <span className="text-xs">🎬</span>
+              Vídeos
             </a>
           </Link>
 
