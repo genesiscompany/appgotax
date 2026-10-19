@@ -3,7 +3,7 @@ import { useLocation, Link } from "wouter";
 import { clearToken } from "@/lib/api";
 import {
   LayoutDashboard, Users, DollarSign, Wallet, BarChart3,
-  LogOut, Menu, X, ChevronRight, Building2, Receipt,
+  LogOut, Menu, X, ChevronRight, Building2, PlayCircle, Receipt,
 } from "lucide-react";
 
 const nav = [
@@ -14,6 +14,7 @@ const nav = [
   { href: "/comissoes", label: "Comissões", icon: DollarSign },
   { href: "/resgates", label: "Saques", icon: Wallet },
   { href: "/relatorios", label: "Relatórios", icon: BarChart3 },
+  { href: "/treinamento", label: "Treinamento", icon: PlayCircle },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {

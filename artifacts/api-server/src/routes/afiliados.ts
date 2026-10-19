@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
+import { ensureTreinamentoVideosTable } from "../lib/treinamentoVideos";
 
 const router: IRouter = Router();
 const JWT_SECRET = process.env.JWT_SECRET || "afiliados-gotaxi-secret-2024";
@@ -821,6 +822,18 @@ router.post("/registrar-indicacao", async (req, res) => {
 
     return res.json({ ok: true, afiliado_nome: afiliado.nome ?? "" });
   } catch (err) { return res.status(500).json({ error: "server_error" }); }
+});
+
+// GET /api/afiliados/videos — vídeos de treinamento ativos
+router.get("/videos", async (req, res) => {
+  try {
+    const afiliadoId = requireAfiliado(req, res);
+    if (!afiliadoId) return;
+    await ensureTreinamentoVideosTable();
+    const rows = await db.execute(sql`SELECT id, titulo, descricao, youtube_id, categoria, ordem
+      FROM treinamento_videos WHERE ativo = true ORDER BY categoria, ordem, id`);
+    res.json(rows.rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }
 });
 
 // ── Financeiro dos motoristas/boys indicados pelo afiliado ───────────────────

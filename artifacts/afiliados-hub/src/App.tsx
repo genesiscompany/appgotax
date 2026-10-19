@@ -10,6 +10,7 @@ import Corporativo from "@/pages/Corporativo";
 import Comissoes from "@/pages/Comissoes";
 import Resgates from "@/pages/Resgates";
 import Relatorios from "@/pages/Relatorios";
+import Treinamento from "@/pages/Treinamento";
 import Landing from "@/pages/Landing";
 import BaixarApp from "@/pages/BaixarApp";
 import Layout from "@/components/Layout";
@@ -94,6 +95,15 @@ function AppRoutes() {
           <AuthGuard>
             <Layout>
               <Relatorios />
+            </Layout>
+          </AuthGuard>
+        )}
+      </Route>
+      <Route path="/treinamento">
+        {() => (
+          <AuthGuard>
+            <Layout>
+              <Treinamento />
             </Layout>
           </AuthGuard>
         )}

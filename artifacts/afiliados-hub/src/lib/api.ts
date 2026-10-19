@@ -49,6 +49,7 @@ export const api = {
   relatorioUrl: () => `${API}/relatorio.csv`,
   publicReferral: (codigo: string) => fetch(`${API}/r/${codigo}`).then(r => r.json()),
   registrarIndicacao: (data: any) => req("POST", "/registrar-indicacao", data),
+  videos: () => req("GET", "/videos"),
 };
 
 export function formatBRL(v: number | string | null | undefined) {
