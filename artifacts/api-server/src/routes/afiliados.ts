@@ -829,7 +829,7 @@ router.get("/videos", async (req, res) => {
     const afiliadoId = requireAfiliado(req, res);
     if (!afiliadoId) return;
     await ensureTreinamentoVideosTable();
-    const rows = await db.execute(sql`SELECT id, titulo, descricao, youtube_id, categoria, ordem
+    const rows = await db.execute(sql`SELECT id, tipo, titulo, descricao, youtube_id, arquivo_url, arquivo_nome, categoria, ordem
       FROM treinamento_videos WHERE ativo = true ORDER BY categoria, ordem, id`);
     res.json(rows.rows);
   } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }

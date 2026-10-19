@@ -5,6 +5,10 @@ import { eq, sql } from "drizzle-orm";
 import jwt from "jsonwebtoken";
 import { ensurePushTables } from "../lib/ensurePushTables";
 import { ensureTreinamentoVideosTable, youtubeIdFromUrl } from "../lib/treinamentoVideos";
+import { uploadImageToGCS } from "../lib/uploadImage";
+import multer from "multer";
+import path from "path";
+import fs from "fs/promises";
 
 const router: IRouter = Router();
 const JWT_SECRET = process.env["JWT_SECRET"] || "gotaxi-admin-secret-2024";
@@ -1043,14 +1047,27 @@ router.get("/destaques", requireAdmin, async (_req: Request, res: Response) => {
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
 });
 
-// ── Vídeos de treinamento (exibidos no Hub de Afiliados) ─────────────────────
-function videoInput(body: any) {
+// ── Vídeos e folhetos PDF de treinamento (exibidos no Hub de Afiliados) ────
+const folhetoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => cb(null, file.mimetype === "application/pdf"),
+});
+
+function materialInput(body: any) {
   const titulo = String(body?.titulo ?? "").trim().slice(0, 200);
   const categoria = String(body?.categoria ?? "").trim().slice(0, 100) || "Geral";
   const descricao = String(body?.descricao ?? "").trim().slice(0, 2000);
-  const youtubeId = youtubeIdFromUrl(body?.youtube_url ?? body?.youtube_id);
   const ordem = Number.isFinite(Number(body?.ordem)) ? Math.trunc(Number(body.ordem)) : 0;
-  return { titulo, categoria, descricao, youtubeId, ordem };
+  return { titulo, categoria, descricao, ordem };
+}
+
+async function removerFolhetoLocal(url: unknown) {
+  const prefix = "/api/uploads/folhetos/";
+  if (typeof url !== "string" || !url.startsWith(prefix)) return;
+  const nome = path.basename(url);
+  const dir = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.resolve(process.cwd(), "public", "uploads");
+  await fs.unlink(path.join(dir, "folhetos", nome)).catch(() => undefined);
 }
 
 router.get("/videos", requireAdmin, async (_req, res) => {
@@ -1064,11 +1081,33 @@ router.get("/videos", requireAdmin, async (_req, res) => {
 router.post("/videos", requireAdmin, async (req, res) => {
   try {
     await ensureTreinamentoVideosTable();
-    const v = videoInput(req.body);
+    const v = materialInput(req.body);
+    const youtubeId = youtubeIdFromUrl(req.body?.youtube_url ?? req.body?.youtube_id);
     if (!v.titulo) { res.status(400).json({ error: "titulo_obrigatorio" }); return; }
-    if (!v.youtubeId) { res.status(400).json({ error: "link_youtube_invalido" }); return; }
-    const rows = await db.execute(sql`INSERT INTO treinamento_videos (titulo, descricao, youtube_id, categoria, ordem, ativo)
-      VALUES (${v.titulo}, ${v.descricao || null}, ${v.youtubeId}, ${v.categoria}, ${v.ordem}, ${req.body?.ativo !== false}) RETURNING *`);
+    if (!youtubeId) { res.status(400).json({ error: "link_youtube_invalido" }); return; }
+    const rows = await db.execute(sql`INSERT INTO treinamento_videos (tipo, titulo, descricao, youtube_id, categoria, ordem, ativo)
+      VALUES ('video', ${v.titulo}, ${v.descricao || null}, ${youtubeId}, ${v.categoria}, ${v.ordem}, ${req.body?.ativo !== false}) RETURNING *`);
+    res.status(201).json(rows.rows[0]);
+  } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }
+});
+
+router.post("/videos/pdf", requireAdmin, (req, res, next) => {
+  folhetoUpload.single("arquivo")(req, res, (err: any) => {
+    if (err?.code === "LIMIT_FILE_SIZE") { res.status(400).json({ error: "pdf_muito_grande" }); return; }
+    if (err) { next(err); return; }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    await ensureTreinamentoVideosTable();
+    const v = materialInput(req.body);
+    const file = req.file;
+    if (!v.titulo) { res.status(400).json({ error: "titulo_obrigatorio" }); return; }
+    if (!file || file.buffer.subarray(0, 5).toString("latin1") !== "%PDF-") { res.status(400).json({ error: "pdf_invalido" }); return; }
+    const url = await uploadImageToGCS(file.buffer, "folheto.pdf", "folhetos");
+    const nome = String(file.originalname || "folheto.pdf").slice(0, 255);
+    const rows = await db.execute(sql`INSERT INTO treinamento_videos (tipo, titulo, descricao, arquivo_url, arquivo_nome, categoria, ordem, ativo)
+      VALUES ('pdf', ${v.titulo}, ${v.descricao || null}, ${url}, ${nome}, ${v.categoria}, ${v.ordem}, true) RETURNING *`);
     res.status(201).json(rows.rows[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }
 });
@@ -1080,18 +1119,21 @@ router.put("/videos/:id", requireAdmin, async (req, res) => {
     const current = (await db.execute(sql`SELECT * FROM treinamento_videos WHERE id = ${id}`)).rows[0] as any;
     if (!current) { res.status(404).json({ error: "not_found" }); return; }
     const body = req.body ?? {};
-    const v = videoInput({
+    const v = materialInput({
       titulo: body.titulo ?? current.titulo,
       categoria: body.categoria ?? current.categoria,
       descricao: body.descricao ?? current.descricao,
-      youtube_url: body.youtube_url ?? current.youtube_id,
       ordem: body.ordem ?? current.ordem,
     });
     if (!v.titulo) { res.status(400).json({ error: "titulo_obrigatorio" }); return; }
-    if (!v.youtubeId) { res.status(400).json({ error: "link_youtube_invalido" }); return; }
+    let youtubeId: string | null = current.youtube_id ?? null;
+    if (current.tipo !== "pdf") {
+      youtubeId = youtubeIdFromUrl(body.youtube_url ?? current.youtube_id);
+      if (!youtubeId) { res.status(400).json({ error: "link_youtube_invalido" }); return; }
+    }
     const ativo = typeof body.ativo === "boolean" ? body.ativo : Boolean(current.ativo);
     const rows = await db.execute(sql`UPDATE treinamento_videos SET titulo = ${v.titulo}, descricao = ${v.descricao || null},
-      youtube_id = ${v.youtubeId}, categoria = ${v.categoria}, ordem = ${v.ordem}, ativo = ${ativo}
+      youtube_id = ${youtubeId}, categoria = ${v.categoria}, ordem = ${v.ordem}, ativo = ${ativo}
       WHERE id = ${id} RETURNING *`);
     res.json(rows.rows[0]);
   } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }
@@ -1100,7 +1142,8 @@ router.put("/videos/:id", requireAdmin, async (req, res) => {
 router.delete("/videos/:id", requireAdmin, async (req, res) => {
   try {
     await ensureTreinamentoVideosTable();
-    await db.execute(sql`DELETE FROM treinamento_videos WHERE id = ${Number(req.params.id)}`);
+    const rows = await db.execute(sql`DELETE FROM treinamento_videos WHERE id = ${Number(req.params.id)} RETURNING arquivo_url`);
+    await removerFolhetoLocal((rows.rows[0] as any)?.arquivo_url);
     res.json({ ok: true });
   } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }
 });

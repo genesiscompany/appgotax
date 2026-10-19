@@ -14,6 +14,10 @@ export async function ensureTreinamentoVideosTable() {
     ativo BOOLEAN NOT NULL DEFAULT true,
     criado_em TIMESTAMP NOT NULL DEFAULT NOW()
   )`);
+  await db.execute(sql`ALTER TABLE treinamento_videos ADD COLUMN IF NOT EXISTS tipo VARCHAR(10) NOT NULL DEFAULT 'video'`);
+  await db.execute(sql`ALTER TABLE treinamento_videos ADD COLUMN IF NOT EXISTS arquivo_url TEXT`);
+  await db.execute(sql`ALTER TABLE treinamento_videos ADD COLUMN IF NOT EXISTS arquivo_nome VARCHAR(255)`);
+  await db.execute(sql`ALTER TABLE treinamento_videos ALTER COLUMN youtube_id DROP NOT NULL`);
   ready = true;
 }
 
