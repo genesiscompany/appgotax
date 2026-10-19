@@ -7,6 +7,7 @@ import * as Clipboard from "expo-clipboard";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
 import DefinirDestino, { useDestino } from "@/components/DefinirDestino";
+import Financeiro from "@/components/Financeiro";
 import * as ImagePicker from "expo-image-picker";
 import QRCode from "react-native-qrcode-svg";
 import { useProAuth, PRO_COLORS, PRO_LABELS, PRO_ICONS } from "@/context/ProAuthContext";
@@ -382,7 +383,7 @@ function buildPixImgUrl(pixImagem: string, apiBase: string) {
   return `${base}${pixImagem}`;
 }
 
-type TelaMenu = "documentos" | "dados" | "recebimentos" | "pix" | "veiculo" | "indicacao" | "destino";
+type TelaMenu = "documentos" | "dados" | "recebimentos" | "pix" | "veiculo" | "indicacao" | "destino" | "financeiro";
 
 const TELA_TITULOS: Record<TelaMenu, string> = {
   documentos: "Documentos",
@@ -392,6 +393,7 @@ const TELA_TITULOS: Record<TelaMenu, string> = {
   veiculo: "Veículo",
   indicacao: "Indicação",
   destino: "Definir destino",
+  financeiro: "Financeiro",
 };
 
 function formatBRL(v: number | string | null | undefined) {
@@ -703,6 +705,7 @@ export default function ProPerfil() {
       subtitle: docsAlerta ? `⚠️ ${docs.length - docsAprovados} pendente(s)` : `✓ ${docsAprovados} aprovados`,
       alerta: docsAlerta, onPress: () => abrirTela("documentos"),
     },
+    { key: "financeiro", icon: "💰", title: "Financeiro", subtitle: "Despesas e lucro", onPress: () => abrirTela("financeiro") },
     { key: "dados", icon: "👤", title: "Dados pessoais", subtitle: "Nome, e-mail, telefone, CPF e cidade", onPress: () => abrirTela("dados") },
     {
       key: "recebimentos", icon: "💳", title: "Recebimentos",
@@ -1062,6 +1065,9 @@ export default function ProPerfil() {
             </View>
           )}
         </View>
+              )}
+              {tela === "financeiro" && !!proUser.token && (
+                <Financeiro token={proUser.token} cor={cor} />
               )}
               {tela === "destino" && !!proUser.token && (
                 <DefinirDestino token={proUser.token} cor={cor} onChange={setDestinoInfo} />

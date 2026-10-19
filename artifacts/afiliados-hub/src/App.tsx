@@ -5,11 +5,11 @@ import { getToken, clearToken, api } from "@/lib/api";
 import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
 import Indicados from "@/pages/Indicados";
+import Financeiro from "@/pages/Financeiro";
 import Corporativo from "@/pages/Corporativo";
 import Comissoes from "@/pages/Comissoes";
 import Resgates from "@/pages/Resgates";
 import Relatorios from "@/pages/Relatorios";
-import Treinamento from "@/pages/Treinamento";
 import Landing from "@/pages/Landing";
 import BaixarApp from "@/pages/BaixarApp";
 import Layout from "@/components/Layout";
@@ -53,6 +53,15 @@ function AppRoutes() {
           </AuthGuard>
         )}
       </Route>
+      <Route path="/financeiro">
+        {() => (
+          <AuthGuard>
+            <Layout>
+              <Financeiro />
+            </Layout>
+          </AuthGuard>
+        )}
+      </Route>
       <Route path="/corporativo">
         {() => (
           <AuthGuard>
@@ -85,15 +94,6 @@ function AppRoutes() {
           <AuthGuard>
             <Layout>
               <Relatorios />
-            </Layout>
-          </AuthGuard>
-        )}
-      </Route>
-      <Route path="/treinamento">
-        {() => (
-          <AuthGuard>
-            <Layout>
-              <Treinamento />
             </Layout>
           </AuthGuard>
         )}

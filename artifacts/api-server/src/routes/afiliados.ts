@@ -1,10 +1,10 @@
 import { Router, type IRouter } from "express";
+import { calcularFinanceiro, lerPeriodo, listarDespesas } from "../lib/financeiroProfissional";
 import { db } from "@workspace/db";
 import { sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
-import { ensureTreinamentoVideosTable } from "../lib/treinamentoVideos";
 
 const router: IRouter = Router();
 const JWT_SECRET = process.env.JWT_SECRET || "afiliados-gotaxi-secret-2024";
@@ -823,15 +823,38 @@ router.post("/registrar-indicacao", async (req, res) => {
   } catch (err) { return res.status(500).json({ error: "server_error" }); }
 });
 
-// GET /api/afiliados/videos — vídeos de treinamento ativos
-router.get("/videos", async (req, res) => {
+// ── Financeiro dos motoristas/boys indicados pelo afiliado ───────────────────
+async function codigoDoAfiliado(afiliadoId: number): Promise<string | null> {
+  const r = (await db.execute(sql`SELECT codigo FROM afiliados WHERE id = ${afiliadoId}`)).rows[0] as any;
+  return r?.codigo ? String(r.codigo) : null;
+}
+
+router.get("/financeiro-indicados", async (req, res) => {
   try {
     const afiliadoId = requireAfiliado(req, res);
     if (!afiliadoId) return;
-    await ensureTreinamentoVideosTable();
-    const rows = await db.execute(sql`SELECT id, tipo, titulo, descricao, youtube_id, arquivo_url, arquivo_nome, categoria, ordem
-      FROM treinamento_videos WHERE ativo = true ORDER BY categoria, ordem, id`);
-    res.json(rows.rows);
+    const codigo = await codigoDoAfiliado(afiliadoId);
+    if (!codigo) { res.json({ periodo: lerPeriodo(req.query), profissionais: [] }); return; }
+    const { de, ate } = lerPeriodo(req.query);
+    const indicados = (await db.execute(sql`SELECT id, nome, tipo_profissional, cidade FROM motoristas_app
+      WHERE UPPER(TRIM(indicado_por)) = UPPER(TRIM(${codigo})) ORDER BY nome`)).rows as any[];
+    const profissionais = [];
+    for (const m of indicados) profissionais.push({ ...m, ...(await calcularFinanceiro(Number(m.id), de, ate)) });
+    res.json({ periodo: { de, ate }, profissionais });
+  } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }
+});
+
+router.get("/financeiro-indicados/:id", async (req, res) => {
+  try {
+    const afiliadoId = requireAfiliado(req, res);
+    if (!afiliadoId) return;
+    const codigo = await codigoDoAfiliado(afiliadoId);
+    const id = Number(req.params.id);
+    const m = codigo ? (await db.execute(sql`SELECT id, nome, tipo_profissional FROM motoristas_app
+      WHERE id = ${id} AND UPPER(TRIM(indicado_por)) = UPPER(TRIM(${codigo}))`)).rows[0] : null;
+    if (!m) { res.status(404).json({ error: "not_found" }); return; }
+    const { de, ate } = lerPeriodo(req.query);
+    res.json({ ...m, ...(await calcularFinanceiro(id, de, ate)), lista_despesas: await listarDespesas(id, de, ate) });
   } catch (err) { console.error(err); res.status(500).json({ error: "server_error" }); }
 });
 

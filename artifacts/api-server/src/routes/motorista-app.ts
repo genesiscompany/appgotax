@@ -1,4 +1,5 @@
 import { Router, type IRouter, type Request, type Response, type NextFunction } from "express";
+import { calcularFinanceiro, ensureDespesasTable, lerDespesa, lerPeriodo, listarDespesas } from "../lib/financeiroProfissional";
 import { db } from "@workspace/db";
 import {
   ensureDestinoMotorista, coordenadaValida, distanciaKm, distanciaKmSql,
@@ -933,6 +934,68 @@ router.get("/ganhos", async (req: Request, res: Response) => {
   }
 });
 
+// ── Financeiro: despesas e lucro do profissional ─────────────────────────────
+router.get("/financeiro", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+  try {
+    const { de, ate } = lerPeriodo(req.query);
+    const resumo = await calcularFinanceiro(motoristaId, de, ate);
+    return res.json({ ...resumo, lista_despesas: await listarDespesas(motoristaId, de, ate) });
+  } catch (e) {
+    console.error("[financeiro]", e);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+router.post("/despesas", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+  try {
+    await ensureDespesasTable();
+    const d = lerDespesa(req.body);
+    if (typeof d === "string") return res.status(400).json({ error: d });
+    const rows = await db.execute(sql`INSERT INTO motorista_despesas (motorista_id, categoria, valor, data, descricao)
+      VALUES (${motoristaId}, ${d.categoria}, ${d.valor}, ${d.data}::date, ${d.descricao}) RETURNING id`);
+    return res.status(201).json(rows.rows[0]);
+  } catch (e) {
+    console.error("[despesas]", e);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+router.put("/despesas/:id", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+  try {
+    await ensureDespesasTable();
+    const d = lerDespesa(req.body);
+    if (typeof d === "string") return res.status(400).json({ error: d });
+    const rows = await db.execute(sql`UPDATE motorista_despesas SET categoria = ${d.categoria}, valor = ${d.valor},
+      data = ${d.data}::date, descricao = ${d.descricao}
+      WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} RETURNING id`);
+    if (!rows.rows.length) return res.status(404).json({ error: "not_found" });
+    return res.json(rows.rows[0]);
+  } catch (e) {
+    console.error("[despesas]", e);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+router.delete("/despesas/:id", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+  try {
+    await ensureDespesasTable();
+    const rows = await db.execute(sql`DELETE FROM motorista_despesas WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} RETURNING id`);
+    if (!rows.rows.length) return res.status(404).json({ error: "not_found" });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("[despesas]", e);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
 // ── GET /stats ─────────────────────────────────────────────────────────────────
 router.get("/stats", async (req: Request, res: Response) => {
   await ensureTable();
@@ -1233,20 +1296,14 @@ async function ensureCorridasTable() {
       cliente_nome VARCHAR(150),
       cliente_rating DECIMAL(3,2) DEFAULT 5.0,
       cliente_avaliacoes INTEGER DEFAULT 0,
-      status VARCHAR(30) DEFAULT 'aguardando',
+      status VARCHAR(20) DEFAULT 'aguardando',
       criado_em TIMESTAMP DEFAULT NOW(),
       expira_em TIMESTAMP DEFAULT NOW() + INTERVAL '30 seconds'
     )
   `));
   await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
   await db.execute(sql.raw(`ALTER TABLE corridas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
-  await db.execute(sql.raw(`DO $$ BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'corridas_solicitadas' AND column_name = 'status' AND character_maximum_length < 30) THEN
-      ALTER TABLE corridas_solicitadas ALTER COLUMN status TYPE VARCHAR(30);
-    END IF;
-  END $$`));
   await db.execute(sql.raw(`ALTER TABLE corridas ADD COLUMN IF NOT EXISTS customer_id INTEGER`));
-  await db.execute(sql.raw(`ALTER TABLE corridas ADD COLUMN IF NOT EXISTS simulada BOOLEAN NOT NULL DEFAULT false`));
 }
 
 // GET /corrida-pendente — poll for pending ride (driver app)
@@ -1287,7 +1344,6 @@ router.post("/corrida/:id/aceitar", async (req: Request, res: Response) => {
     const updRows = await tx.execute(sql.raw(`
       UPDATE corridas_solicitadas SET status = 'aceita'
       WHERE id = ${Number(req.params.id)} AND motorista_id = ${motoristaId} AND status = 'aguardando'
-        AND corrida_id IS NOT NULL
       RETURNING corrida_id
     `));
 
@@ -1390,7 +1446,7 @@ router.post("/corrida/:id/finalizar", async (req: Request, res: Response) => {
   try {
     await ensureCorridasTable();
     const reserved = await db.transaction(async tx => {
-      const ride = await tx.execute(sql`SELECT cs.status, cs.valor_estimado, cs.corrida_id, COALESCE(c.payment_source, cs.payment_source, 'direto') AS payment_source, c.simulada
+      const ride = await tx.execute(sql`SELECT cs.status, cs.valor_estimado, cs.corrida_id, COALESCE(c.payment_source, cs.payment_source, 'direto') AS payment_source
         FROM corridas_solicitadas cs JOIN corridas c ON c.id = cs.corrida_id JOIN motoristas_app ma ON ma.id = cs.motorista_id
         WHERE cs.id = ${Number(req.params.id)} AND cs.motorista_id = ${motoristaId} AND ma.ativo = true AND ma.status = 'aprovado' FOR UPDATE OF cs, c, ma`);
       const row = ride.rows[0] as any;
@@ -1460,8 +1516,6 @@ router.post("/corrida/:id/finalizar", async (req: Request, res: Response) => {
       return;
     }
     if (!finalized) { res.status(409).json({ error: "finalization_reservation_lost" }); return; }
-    // Corrida de teste do admin: não credita saldo nem gera comissão.
-    if (finalized.simulada) return res.json({ ok: true, valor: finalized.valor, duplicate: finalized.duplicate, paymentStatus: "direto", paymentSource: "direto", pix: null, simulada: true });
     if (finalized.payment_source === "direto") await settleServiceEarning("motorista", String(finalized.corrida_id), null);
     else if (prePayment?.status === "approved") await settleServiceEarning("motorista", String(finalized.corrida_id), Number(prePayment.id));
     // A solicitação pelo app já registra este mesmo evento. Repetir aqui é
@@ -1678,35 +1732,21 @@ router.post("/corrida/simular", requireAdmin, async (req: Request, res: Response
       UPDATE corridas_solicitadas SET status = 'cancelada'
       WHERE motorista_id = ${Number(motorista_id)} AND status = 'aguardando'
     `));
-    // A solicitação precisa de uma corrida principal para aceitar/finalizar/cancelar.
-    const empresaRows = await db.execute(sql.raw(`SELECT COALESCE((SELECT id FROM empresas ORDER BY id LIMIT 1), 1) AS id`));
-    const corridaRows = await db.execute(sql.raw(`
-      INSERT INTO corridas
-        (empresa_id, passageiro_nome, origem_endereco, destino_endereco,
-         status, valor, distancia_km, forma_pagamento, payment_source, observacoes, simulada)
-      VALUES (
-        ${Number((empresaRows.rows[0] as any).id)}, '${esc(cliente_nome)}',
-        '${esc(origem_endereco)}', '${esc(destino_endereco)}',
-        'aguardando', ${Number(valor_estimado)}, ${Number(distancia_viagem_km)},
-        'dinheiro', 'direto', 'Corrida simulada pelo admin', true
-      ) RETURNING id
-    `));
-    const corridaPrincipalId = Number((corridaRows.rows[0] as any).id);
     const rows = await db.execute(sql.raw(`
       INSERT INTO corridas_solicitadas
-        (motorista_id, corrida_id, tipo_servico, categoria_nome, valor_estimado,
+        (motorista_id, tipo_servico, categoria_nome, valor_estimado,
          origem_endereco, destino_endereco,
          distancia_motorista_km, tempo_motorista_min,
          distancia_viagem_km, tempo_viagem_min,
          cliente_nome, cliente_rating, cliente_avaliacoes,
-         forma_pagamento, payment_source, expira_em)
+         expira_em)
       VALUES (
-        ${Number(motorista_id)}, ${corridaPrincipalId}, '${esc(tipo_servico)}', '${esc(categoria_nome)}',
+        ${Number(motorista_id)}, '${esc(tipo_servico)}', '${esc(categoria_nome)}',
         ${Number(valor_estimado)}, '${esc(origem_endereco)}', '${esc(destino_endereco)}',
         ${Number(distancia_motorista_km)}, ${Number(tempo_motorista_min)},
         ${Number(distancia_viagem_km)}, ${Number(tempo_viagem_min)},
         '${esc(cliente_nome)}', ${Number(cliente_rating)}, ${Number(cliente_avaliacoes)},
-        'dinheiro', 'direto', NOW() + INTERVAL '60 seconds'
+        NOW() + INTERVAL '30 seconds'
       ) RETURNING *
     `));
     const corrida = rows.rows[0] as any;
@@ -1751,18 +1791,13 @@ async function ensureEntregasTable() {
       cliente_rating DECIMAL(3,2) DEFAULT 5.0,
       cliente_avaliacoes INTEGER DEFAULT 0,
       descricao_item TEXT,
-      status VARCHAR(30) DEFAULT 'aguardando',
+      status VARCHAR(20) DEFAULT 'aguardando',
       criado_em TIMESTAMP DEFAULT NOW(),
       expira_em TIMESTAMP DEFAULT NOW() + INTERVAL '30 seconds'
     )
   `));
   await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS forma_pagamento TEXT`));
   await db.execute(sql.raw(`ALTER TABLE entregas_solicitadas ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'direto'`));
-  await db.execute(sql.raw(`DO $$ BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'entregas_solicitadas' AND column_name = 'status' AND character_maximum_length < 30) THEN
-      ALTER TABLE entregas_solicitadas ALTER COLUMN status TYPE VARCHAR(30);
-    END IF;
-  END $$`));
   await db.execute(sql.raw(`ALTER TABLE entregas ADD COLUMN IF NOT EXISTS customer_id INTEGER`));
 }
 
