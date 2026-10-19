@@ -16,7 +16,7 @@ import { issueMotoristaToken, motoristaIdFromRequest } from "../lib/motoristaTok
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { encryptToken, handleEmpresaOauthCallback, isEmpresaOauthState } from "./payments";
 import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
-import { gerarComissaoCliente } from "../lib/comissaoAfiliado";
+import { gerarComissaoCliente, resolveAfiliadoByCode } from "../lib/comissaoAfiliado";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -935,6 +935,81 @@ router.get("/ganhos", async (req: Request, res: Response) => {
 });
 
 // ── Financeiro: despesas e lucro do profissional ─────────────────────────────
+// ── Afiliado do próprio motorista (saldo, últimos indicados e saque) ─────────
+async function afiliadoDoMotorista(motoristaId: number) {
+  const m = (await db.execute(sql`SELECT codigo_referral, pix_chave FROM motoristas_app WHERE id = ${motoristaId}`)).rows[0] as any;
+  if (!m?.codigo_referral) return null;
+  const afi = await resolveAfiliadoByCode(String(m.codigo_referral));
+  return afi ? { ...afi, codigo: String(m.codigo_referral), pixChave: m.pix_chave ?? null } : null;
+}
+
+router.get("/afiliado", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+  try {
+    const afi = await afiliadoDoMotorista(motoristaId);
+    if (!afi) return res.status(404).json({ error: "sem_codigo" });
+    const [a, cfg, pend, ind, resg] = await Promise.all([
+      db.execute(sql`SELECT saldo, total_comissoes, chave_pix FROM afiliados WHERE id = ${afi.afiliadoId}`),
+      db.execute(sql`SELECT valor_minimo_saque FROM afiliados_config LIMIT 1`),
+      db.execute(sql`SELECT COALESCE(SUM(valor), 0) AS soma FROM afiliado_resgates WHERE afiliado_id = ${afi.afiliadoId} AND status IN ('pendente', 'processando')`),
+      db.execute(sql`
+        SELECT * FROM (
+          SELECT nome, 'cliente' AS tipo, criado_em FROM usuarios
+            WHERE papel = 'cliente' AND UPPER(TRIM(indicado_por)) = UPPER(${afi.codigo})
+          UNION ALL
+          SELECT nome, COALESCE(tipo_profissional, 'motorista') AS tipo, criado_em FROM motoristas_app
+            WHERE UPPER(TRIM(indicado_por)) = UPPER(${afi.codigo})
+          UNION ALL
+          SELECT nome, 'empresa' AS tipo, criado_em FROM empresas
+            WHERE UPPER(TRIM(indicado_por)) = UPPER(${afi.codigo})
+        ) t ORDER BY criado_em DESC LIMIT 10`),
+      db.execute(sql`SELECT id, valor, chave_pix, status, criado_em FROM afiliado_resgates WHERE afiliado_id = ${afi.afiliadoId} ORDER BY criado_em DESC LIMIT 5`),
+    ]);
+    const row = a.rows[0] as any;
+    return res.json({
+      codigo: afi.codigo,
+      saldo: Number(row?.saldo ?? 0),
+      total_comissoes: Number(row?.total_comissoes ?? 0),
+      saques_pendentes: Number((pend.rows[0] as any)?.soma ?? 0),
+      valor_minimo_saque: Number((cfg.rows[0] as any)?.valor_minimo_saque ?? 50),
+      chave_pix: afi.pixChave || row?.chave_pix || null,
+      ultimos_indicados: ind.rows,
+      ultimos_saques: resg.rows,
+    });
+  } catch (err) {
+    console.error("GET /afiliado error:", err);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+router.post("/afiliado/saque", async (req: Request, res: Response) => {
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+  try {
+    const valor = Math.round(Number(req.body?.valor) * 100) / 100;
+    const chavePix = String(req.body?.chave_pix ?? "").trim().slice(0, 255);
+    if (!Number.isFinite(valor) || valor <= 0) return res.status(400).json({ error: "Valor inválido" });
+    if (!chavePix) return res.status(400).json({ error: "Informe a chave PIX" });
+    const afi = await afiliadoDoMotorista(motoristaId);
+    if (!afi) return res.status(404).json({ error: "Código de indicação não encontrado" });
+    const minimo = Number(((await db.execute(sql`SELECT valor_minimo_saque FROM afiliados_config LIMIT 1`)).rows[0] as any)?.valor_minimo_saque ?? 50);
+    if (valor < minimo) return res.status(400).json({ error: `Valor mínimo para saque é R$ ${minimo.toFixed(2).replace(".", ",")}` });
+    const ok = await db.transaction(async (tx) => {
+      const upd = (await tx.execute(sql`UPDATE afiliados SET saldo = saldo - ${valor}, chave_pix = ${chavePix}
+        WHERE id = ${afi.afiliadoId} AND saldo >= ${valor} RETURNING id`)).rows;
+      if (!upd.length) return false;
+      await tx.execute(sql`INSERT INTO afiliado_resgates (afiliado_id, valor, chave_pix) VALUES (${afi.afiliadoId}, ${valor}, ${chavePix})`);
+      return true;
+    });
+    if (!ok) return res.status(400).json({ error: "Saldo insuficiente" });
+    return res.json({ ok: true, message: "Saque solicitado! Processado em até 3 dias úteis." });
+  } catch (err) {
+    console.error("POST /afiliado/saque error:", err);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
 router.get("/financeiro", async (req: Request, res: Response) => {
   const motoristaId = getMotoristaId(req);
   if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });

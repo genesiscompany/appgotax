@@ -21,7 +21,7 @@ export function decodeClienteTokenFromReq(req: any): number | null {
   return decodeClienteToken(token);
 }
 
-async function resolveAfiliadoByCode(
+export async function resolveAfiliadoByCode(
   codigo: string,
 ): Promise<{ afiliadoId: number; ownerUsuarioId: number } | null> {
   const cod = String(codigo || "").trim().toUpperCase();

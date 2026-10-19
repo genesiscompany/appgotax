@@ -8,6 +8,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
 import DefinirDestino, { useDestino } from "@/components/DefinirDestino";
 import Financeiro from "@/components/Financeiro";
+import AfiliadoPro from "@/components/AfiliadoPro";
 import * as ImagePicker from "expo-image-picker";
 import QRCode from "react-native-qrcode-svg";
 import { useProAuth, PRO_COLORS, PRO_LABELS, PRO_ICONS } from "@/context/ProAuthContext";
@@ -721,7 +722,7 @@ export default function ProPerfil() {
       key: "veiculo", icon: proUser.tipo_profissional === "motorista" ? "🚗" : "🛵", title: "Veículo",
       subtitle: veiculoResumo || "⚠️ Cadastre seu veículo", alerta: !veiculoResumo, onPress: () => abrirTela("veiculo"),
     },
-    { key: "indicacao", icon: "🔗", title: "Indicação", subtitle: "Seu link para indicar amigos", onPress: () => abrirTela("indicacao") },
+    { key: "indicacao", icon: "🔗", title: "Indicação", subtitle: "Link, indicados, saldo e saque", onPress: () => abrirTela("indicacao") },
     { key: "pin", icon: "🔐", title: "Alterar PIN", subtitle: "PIN de acesso ao app", onPress: () => setPinModal(true) },
     {
       key: "destino", icon: "📍", title: "Definir destino",
@@ -1074,7 +1075,10 @@ export default function ProPerfil() {
               )}
               {tela === "indicacao" && (
                 proUser.codigo_referral ? (
-                  <ReferralCard codigo={proUser.codigo_referral} cor={cor} />
+                  <>
+                    <ReferralCard codigo={proUser.codigo_referral} cor={cor} />
+                    {!!proUser.token && <AfiliadoPro token={proUser.token} cor={cor} />}
+                  </>
                 ) : (
                   <Text style={styles.vazioTxt}>Seu link de indicação ainda não está disponível.</Text>
                 )

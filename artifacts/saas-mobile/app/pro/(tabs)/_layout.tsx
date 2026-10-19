@@ -38,7 +38,7 @@ function TabIcon({ icon, label, color }: { icon: string; label: string; color: s
   return (
     <View style={styles.iconWrap}>
       <Text style={styles.icon}>{icon}</Text>
-      <Text style={[styles.label, { color }]}>{label}</Text>
+      <Text style={[styles.label, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>{label}</Text>
     </View>
   );
 }
@@ -281,6 +281,7 @@ export default function ProTabsLayout() {
         tabBarActiveTintColor: cor,
         tabBarInactiveTintColor: "#444",
         tabBarShowLabel: false,
+        tabBarIconStyle: { width: "100%" },
       }}>
         <Tabs.Screen name="inicio"
           options={{ tabBarIcon: ({ color }) => <TabIcon icon="🏠" label="Início" color={color} /> }} />
@@ -305,7 +306,7 @@ export default function ProTabsLayout() {
 
 const styles = StyleSheet.create({
   bar: { backgroundColor: "#111", borderTopColor: "#1E1E1E", borderTopWidth: 1, paddingTop: 8 },
-  iconWrap: { alignItems: "center", gap: 3 },
+  iconWrap: { alignItems: "center", gap: 3, width: "100%", paddingHorizontal: 2 },
   icon: { fontSize: 22 },
   label: { fontSize: 10, fontWeight: "700" },
 });
