@@ -194,7 +194,10 @@ export default function ProTabsLayout() {
         method: "POST",
         headers: { Authorization: `Bearer ${proUser!.token}` },
       });
-      if (!res.ok) throw new Error("aceitar failed");
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.error || `http_${res.status}`);
+      }
 
       const resData = await res.json();
       const mainCorridaId = resData?.corrida_id ?? id;
@@ -246,8 +249,12 @@ export default function ProTabsLayout() {
           },
         });
       }
-    } catch {
-      Alert.alert("Erro", "Não foi possível aceitar.");
+    } catch (e: any) {
+      const code = String(e?.message ?? "");
+      const msg = code === "corrida_indisponivel" ? "Esta corrida expirou ou já foi aceita."
+        : code === "unauthorized" ? "Sua sessão expirou. Entre de novo."
+        : "Não foi possível aceitar.";
+      Alert.alert("Erro", code && msg === "Não foi possível aceitar." ? `${msg} (${code})` : msg);
     }
   };
 
