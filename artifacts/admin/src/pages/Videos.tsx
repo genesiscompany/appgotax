@@ -37,9 +37,11 @@ export default function Videos() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        setErro(ERROS[body?.error] ?? "Não foi possível salvar.");
+        setErro(ERROS[body?.error] ?? (res.status === 404
+          ? "Não foi possível salvar: a API ainda não tem a função de vídeos (faça o deploy da api)."
+          : `Não foi possível salvar (${body?.error ?? `erro ${res.status}`}).`));
       } else { setForm(EMPTY); setEditId(null); await load(); }
-    } catch { setErro("Não foi possível salvar."); }
+    } catch { setErro("Não foi possível salvar: sem conexão com a API."); }
     setSaving(false);
   };
 
