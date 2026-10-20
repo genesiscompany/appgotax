@@ -7,6 +7,7 @@ import { ensurePushTables } from "../lib/ensurePushTables";
 import { ensureTreinamentoVideosTable, youtubeIdFromUrl } from "../lib/treinamentoVideos";
 import { uploadImageToGCS } from "../lib/uploadImage";
 import multer from "multer";
+import { ensureViagemSchema, normalizarGenero } from "../lib/viagemMulher";
 import path from "path";
 import fs from "fs/promises";
 
@@ -308,8 +309,9 @@ router.put("/empresas/:id/modulos", requireAdmin, async (req, res) => {
 // ── GET /api/admin/usuarios ───────────────────────────────────────────────────
 router.get("/usuarios", requireAdmin, async (_req, res) => {
   try {
+    await ensureViagemSchema();
     const rows = await db.execute(`
-      SELECT u.id, u.nome, u.email, u.papel, u.empresa_id, e.nome as empresa_nome, u.criado_em
+      SELECT u.id, u.nome, u.email, u.papel, u.empresa_id, e.nome as empresa_nome, u.criado_em, u.genero
       FROM usuarios u
       LEFT JOIN empresas e ON e.id = u.empresa_id
       ORDER BY u.criado_em DESC
@@ -348,8 +350,14 @@ router.patch("/usuarios/:id", requireAdmin, async (req, res) => {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid_id" });
 
-    const { papel, ativo, empresa_id, email, nome } = req.body;
+    const { papel, ativo, empresa_id, email, nome, genero } = req.body;
     const sets: string[] = [];
+    if (genero !== undefined) {
+      await ensureViagemSchema();
+      const g = normalizarGenero(genero);
+      if (genero && !g) return res.status(400).json({ error: "genero_invalido" });
+      sets.push(g ? `genero = '${g}'` : "genero = NULL");
+    }
 
     if (papel !== undefined) sets.push(`papel = '${String(papel).replace(/'/g,"''")}'`);
     if (ativo !== undefined) sets.push(`ativo = ${Boolean(ativo)}`);
@@ -373,7 +381,7 @@ router.patch("/usuarios/:id", requireAdmin, async (req, res) => {
     if (!sets.length) return res.status(400).json({ error: "nothing to update" });
     try {
       const rows = await db.execute(
-        `UPDATE usuarios SET ${sets.join(", ")} WHERE id = ${id} RETURNING id, nome, email, papel, empresa_id, ativo`
+        `UPDATE usuarios SET ${sets.join(", ")} WHERE id = ${id} RETURNING id, nome, email, papel, empresa_id, ativo, genero`
       );
       const out = (rows as any).rows?.[0] ?? (rows as any)[0];
       if (!out) return res.status(404).json({ error: "not_found" });

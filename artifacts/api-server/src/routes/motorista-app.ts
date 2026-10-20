@@ -17,6 +17,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { encryptToken, handleEmpresaOauthCallback, isEmpresaOauthState } from "./payments";
 import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
 import { gerarComissaoCliente, resolveAfiliadoByCode } from "../lib/comissaoAfiliado";
+import { ensureViagemSchema, fotoMotoristaObrigatoria, liberarTaxasReservadas, normalizarGenero, quitarTaxas, taxasCobradasNaSemana } from "../lib/viagemMulher";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -413,6 +414,7 @@ async function upsertRepasseSemana(profissionalId: number, tipoProfissional: str
   // total_taxavel = only the portion subject to the 3% fee (excludes PDV/food deliveries).
   let totalGanhos = 0;
   let totalTaxavel = 0;
+  let taxasCancelamento = 0;
   try {
     if (isEntregador) {
       // ALL deliveries (bruto) — for display purposes
@@ -452,13 +454,15 @@ async function upsertRepasseSemana(profissionalId: number, tipoProfissional: str
           AND criado_em < (${semanaFim}::date + INTERVAL '1 day')
       `);
       totalGanhos  = Number((r.rows[0] as any)?.total ?? 0);
-      totalTaxavel = totalGanhos; // motoristas: all earnings are taxable
+      // Taxas de cancelamento recebidas em nome de outro motorista: repasse integral, sem os 3%.
+      taxasCancelamento = await taxasCobradasNaSemana(profissionalId, semanaInicio, semanaFim);
+      totalTaxavel = Math.max(0, totalGanhos - taxasCancelamento);
     }
   } catch (e) {
     console.error("upsertRepasseSemana sum error:", e);
   }
   const percentual = 3;
-  const valorRepasse = parseFloat((totalTaxavel * percentual / 100).toFixed(2));
+  const valorRepasse = parseFloat((totalTaxavel * percentual / 100 + taxasCancelamento).toFixed(2));
   await db.execute(sql`
     INSERT INTO repasses_pro (profissional_id, tipo_profissional, semana_inicio, semana_fim, total_ganhos, percentual, valor_repasse, status)
     VALUES (${profissionalId}, ${tipoProfissional}, ${semanaInicio}, ${semanaFim}, ${totalGanhos}, ${percentual}, ${valorRepasse}, 'pendente')
@@ -477,6 +481,8 @@ async function upsertRepasseSemana(profissionalId: number, tipoProfissional: str
 router.post("/cadastro", async (req: Request, res: Response) => {
   await ensureTable();
   const { nome, telefone, pin, cpf, email, cidade, estado, tipo_profissional, indicado_por } = req.body;
+  await ensureViagemSchema();
+  const genero = normalizarGenero(req.body?.genero);
   if (!nome || !telefone || !pin) return res.status(400).json({ error: "nome, telefone e PIN são obrigatórios" });
   if (String(pin).length < 4) return res.status(400).json({ error: "PIN deve ter pelo menos 4 dígitos" });
   const tipo = tipo_profissional || "motorista";
@@ -486,10 +492,10 @@ router.post("/cadastro", async (req: Request, res: Response) => {
     const existente = await db.execute(sql`SELECT id FROM motoristas_app WHERE ${telefoneNormalizadoSql("telefone")} = ${telefoneNum} LIMIT 1`);
     if (existente.rows.length) return res.status(409).json({ error: "Telefone já cadastrado" });
     const rows = await db.execute(sql`
-      INSERT INTO motoristas_app (nome, telefone, senha_pin, cpf, email, cidade, estado, tipo_profissional, indicado_por)
-      VALUES (${nome}, ${telefoneNum}, ${String(pin)}, ${cpf || null}, ${email || null}, ${cidade || null}, ${estado || null}, ${tipo}, ${indicado_por || null})
+      INSERT INTO motoristas_app (nome, telefone, senha_pin, cpf, email, cidade, estado, tipo_profissional, indicado_por, genero)
+      VALUES (${nome}, ${telefoneNum}, ${String(pin)}, ${cpf || null}, ${email || null}, ${cidade || null}, ${estado || null}, ${tipo}, ${indicado_por || null}, ${genero})
        RETURNING id, nome, telefone, status, tipo_profissional, criado_em,
-                 aceita_pagamento_direto, aceita_pagamento_app
+                 aceita_pagamento_direto, aceita_pagamento_app, genero, aceita_passageiros, foto
     `);
     const motorista = rows.rows[0] as any;
     const codigo_referral = gerarCodigoReferral(nome, motorista.id);
@@ -506,12 +512,13 @@ router.post("/cadastro", async (req: Request, res: Response) => {
 // ── POST /login ────────────────────────────────────────────────────────────────
 router.post("/login", async (req: Request, res: Response) => {
   await ensureTable();
+  await ensureViagemSchema();
   await ensureRepassesProTable();
   const { telefone, pin } = req.body;
   if (!telefone || !pin) return res.status(400).json({ error: "telefone e PIN são obrigatórios" });
   try {
     const rows = await db.execute(sql`
-      SELECT id, nome, telefone, cpf, email, foto, status, tipo_profissional, cidade, estado,
+      SELECT id, nome, telefone, cpf, email, foto, genero, aceita_passageiros, status, tipo_profissional, cidade, estado,
              veiculo_marca, veiculo_modelo, veiculo_ano, veiculo_cor, veiculo_placa, tipo_veiculo,
              doc_cnh_status, doc_veiculo_status, doc_selfie_status,
              percentual_repasse, saldo, total_ganhos, total_corridas, avaliacao_media, criado_em,
@@ -548,6 +555,7 @@ async function withDriverPaymentStatus(corrida: any) {
 // ── GET /perfil ────────────────────────────────────────────────────────────────
 router.get("/perfil", async (req: Request, res: Response) => {
   await ensureTable();
+  await ensureViagemSchema();
   await ensureRepassesProTable();
   await ensureMotoristaCategoriasTable();
   const motoristaId = getMotoristaId(req);
@@ -555,7 +563,7 @@ router.get("/perfil", async (req: Request, res: Response) => {
   try {
     await checkAutoBlock(motoristaId);
     const rows = await db.execute(sql`
-      SELECT id, nome, telefone, cpf, email, foto, status, tipo_profissional, cidade, estado,
+      SELECT id, nome, telefone, cpf, email, foto, genero, aceita_passageiros, status, tipo_profissional, cidade, estado,
              veiculo_marca, veiculo_modelo, veiculo_ano, veiculo_cor, veiculo_placa, tipo_veiculo,
              doc_cnh_status, doc_veiculo_status, doc_selfie_status,
              percentual_repasse, saldo, total_ganhos, total_corridas, avaliacao_media, criado_em,
@@ -571,6 +579,86 @@ router.get("/perfil", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Erro em GET /perfil:", err);
     return res.status(500).json({ error: "Erro no servidor" });
+  }
+});
+
+// ── PUT /preferencias — gênero (definido uma vez) e quem a motorista aceita levar ──
+router.put("/preferencias", async (req: Request, res: Response) => {
+  await ensureTable();
+  await ensureViagemSchema();
+  const motoristaId = getMotoristaId(req);
+  if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+  try {
+    const atual = (await db.execute(sql`SELECT genero, tipo_profissional FROM motoristas_app WHERE id = ${motoristaId}`)).rows[0] as any;
+    if (!atual) return res.status(404).json({ error: "Motorista não encontrado" });
+    let genero = normalizarGenero(atual.genero);
+    if (req.body?.genero !== undefined) {
+      const novo = normalizarGenero(req.body.genero);
+      if (!novo) return res.status(400).json({ error: "genero_invalido", message: "Escolha Feminino ou Masculino." });
+      if (genero && genero !== novo) return res.status(409).json({ error: "genero_ja_definido", message: "O gênero já foi definido. Para alterar, fale com o suporte." });
+      if (!genero) {
+        await db.execute(sql`UPDATE motoristas_app SET genero = ${novo} WHERE id = ${motoristaId} AND genero IS NULL`);
+        genero = novo;
+      }
+    }
+    if (req.body?.aceita_passageiros !== undefined) {
+      const ap = String(req.body.aceita_passageiros);
+      if (!["todos", "somente_mulheres"].includes(ap)) return res.status(400).json({ error: "aceita_passageiros_invalido" });
+      if (ap === "somente_mulheres" && (genero !== "feminino" || atual.tipo_profissional !== "motorista")) {
+        return res.status(403).json({ error: "somente_motorista_mulher", message: "Opção disponível apenas para motoristas mulheres." });
+      }
+      await db.execute(sql`UPDATE motoristas_app SET aceita_passageiros = ${ap} WHERE id = ${motoristaId}`);
+    }
+    const out = (await db.execute(sql`SELECT genero, aceita_passageiros FROM motoristas_app WHERE id = ${motoristaId}`)).rows[0];
+    return res.json(out);
+  } catch (err) {
+    console.error("PUT /preferencias error:", err);
+    return res.status(500).json({ error: "Erro ao salvar" });
+  }
+});
+
+const fotoPerfilUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => cb(null, /^image\/(jpeg|jpg|png|webp|heic|heif)$/i.test(file.mimetype)),
+});
+
+// ── POST /foto — foto de perfil do profissional ──
+router.post("/foto", (req: Request, res: Response) => {
+  fotoPerfilUpload.single("file")(req, res, async (err: any) => {
+    const motoristaId = getMotoristaId(req);
+    if (!motoristaId) return res.status(401).json({ error: "Não autenticado" });
+    if (err) return res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "A foto deve ter até 8 MB." : "Erro no envio da foto." });
+    const file = (req as any).file;
+    if (!file) return res.status(400).json({ error: "Envie uma imagem (JPG, PNG ou WEBP)." });
+    try {
+      const url = await uploadImageToGCS(file.buffer, file.originalname || "foto.jpg", "motoristas");
+      await db.execute(sql`UPDATE motoristas_app SET foto = ${url}, atualizado_em = NOW() WHERE id = ${motoristaId}`);
+      return res.json({ ok: true, foto: url });
+    } catch (e) {
+      console.error("POST /foto error:", e);
+      return res.status(500).json({ error: "Erro ao salvar a foto" });
+    }
+  });
+});
+
+// ── Admin: PATCH /admin/:id/genero ──
+router.patch("/admin/:id/genero", requireAdmin, async (req: Request, res: Response) => {
+  await ensureTable();
+  await ensureViagemSchema();
+  const id = parseInt(String(req.params.id));
+  const genero = normalizarGenero(req.body?.genero);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "ID inválido" });
+  if (!genero) return res.status(400).json({ error: "genero_invalido" });
+  try {
+    const r = await db.execute(sql`UPDATE motoristas_app SET genero = ${genero},
+      aceita_passageiros = CASE WHEN ${genero} = 'feminino' THEN aceita_passageiros ELSE 'todos' END
+      WHERE id = ${id} RETURNING id, genero, aceita_passageiros`);
+    if (!r.rows.length) return res.status(404).json({ error: "not_found" });
+    return res.json(r.rows[0]);
+  } catch (e) {
+    console.error("admin genero error:", e);
+    return res.status(500).json({ error: "server_error" });
   }
 });
 
@@ -1176,12 +1264,13 @@ router.get("/stats", async (req: Request, res: Response) => {
 // ── Admin: GET /admin/motoristas-app ─────────────────────────────────────────
 router.get("/admin/list", async (req: Request, res: Response) => {
   await ensureTable();
+  await ensureViagemSchema();
   await ensureMotoristaCategoriasTable();
   try {
     const tipo = req.query.tipo as string | undefined;
     const whereClause = tipo ? `WHERE m.tipo_profissional = '${tipo.replace(/'/g, "''")}'` : `WHERE m.tipo_profissional = 'motorista'`;
     const rows = await db.execute(`
-      SELECT m.id, m.nome, m.telefone, m.cpf, m.email, m.status, m.tipo_profissional,
+      SELECT m.id, m.nome, m.telefone, m.cpf, m.email, m.status, m.tipo_profissional, m.genero, m.foto,
              m.tipo_veiculo, m.veiculo_marca, m.veiculo_modelo, m.veiculo_ano, m.veiculo_placa,
              m.doc_cnh_status, m.doc_veiculo_status, m.doc_selfie_status,
              m.total_corridas, m.avaliacao_media, m.criado_em,
@@ -1420,6 +1509,7 @@ router.post("/corrida/:id/aceitar", async (req: Request, res: Response) => {
   if (!motoristaId) return res.status(401).json({ error: "unauthorized" });
   try {
     await ensureCorridasTable();
+    await ensureViagemSchema();
 
     const corridaId = await db.transaction(async tx => {
     const updRows = await tx.execute(sql.raw(`
@@ -1444,6 +1534,7 @@ router.post("/corrida/:id/aceitar", async (req: Request, res: Response) => {
       await tx.execute(sql.raw(`
         UPDATE corridas SET
           status = 'aceita',
+          aceita_em = NOW(),
           motorista_app_id = ${motoristaId},
           motorista_app_nome = '${motoristaNome.replace(/'/g, "''")}'
         WHERE id = ${corrida_id} AND status = 'aguardando'
@@ -1602,6 +1693,9 @@ router.post("/corrida/:id/finalizar", async (req: Request, res: Response) => {
     if (finalized.simulada) return res.json({ ok: true, valor: finalized.valor, duplicate: finalized.duplicate, paymentStatus: "direto", paymentSource: "direto", pix: null, simulada: true });
     if (finalized.payment_source === "direto") await settleServiceEarning("motorista", String(finalized.corrida_id), null);
     else if (prePayment?.status === "approved") await settleServiceEarning("motorista", String(finalized.corrida_id), Number(prePayment.id));
+    if (!finalized.duplicate) {
+      try { await quitarTaxas(Number(finalized.corrida_id), motoristaId); } catch (taxaErr) { console.error("[corrida/finalizar] taxa cancelamento:", taxaErr); }
+    }
     // A solicitação pelo app já registra este mesmo evento. Repetir aqui é
     // seguro e cobre corridas legadas, pois tipo/referência são idênticos.
     try {
@@ -2346,6 +2440,10 @@ router.post("/localizacao", async (req: Request, res: Response) => {
 
     const { lat, lng, online } = req.body;
     if (lat == null || lng == null) return res.status(400).json({ error: "lat e lng obrigatorios" });
+    if (online !== false && await bloqueioSemFoto(motoristaId)) {
+      await db.execute(sql`UPDATE motoristas_app SET online = false, lat = ${Number(lat)}, lng = ${Number(lng)} WHERE id = ${motoristaId}`);
+      return res.status(403).json({ error: "foto_obrigatoria", message: FOTO_OBRIGATORIA_MSG });
+    }
 
     await db.execute(sql`
       UPDATE motoristas_app
@@ -2533,6 +2631,7 @@ router.post("/corrida/:id/cancelar", async (req: Request, res: Response) => {
     await ensureCorridasTable();
     const { motivo_texto } = req.body;
     const texto = String(motivo_texto || "").slice(0, 500);
+    await ensureViagemSchema();
     const cancelled = await db.transaction(async tx => {
       const locked = await tx.execute(sql`SELECT cs.id, cs.corrida_id, cs.status AS assignment_status,
           c.status AS service_status, COALESCE(c.payment_source, cs.payment_source, 'direto') AS payment_source
@@ -2559,6 +2658,7 @@ router.post("/corrida/:id/cancelar", async (req: Request, res: Response) => {
       const service = await tx.execute(sql`UPDATE corridas SET status = 'cancelada', cancelado_em = NOW()
         WHERE id = ${row.corrida_id} AND status IN ('aguardando','aceita','a_caminho','chegou_destino','em_andamento') RETURNING id`);
       if (!service.rows[0]) return { error: "ride_not_cancellable", status: 409 };
+      await liberarTaxasReservadas(tx, Number(row.corrida_id));
       await tx.execute(sql`UPDATE corridas_solicitadas SET status = 'cancelada', motivo_cancelamento = ${texto}
         WHERE id = ${row.id} AND status IN ('aguardando','aceita','em_andamento')`);
       return { ok: true };
@@ -2636,6 +2736,13 @@ router.delete("/caronas/:id", async (req: Request, res: Response) => {
   } catch (err) { console.error("DELETE /caronas motorista", err); return res.status(500).json({ error: "server_error" }); }
 });
 
+async function bloqueioSemFoto(motoristaId: number): Promise<boolean> {
+  if (!(await fotoMotoristaObrigatoria())) return false;
+  const r = (await db.execute(sql`SELECT foto, tipo_profissional FROM motoristas_app WHERE id = ${motoristaId}`)).rows[0] as any;
+  return !!r && r.tipo_profissional === "motorista" && !r.foto;
+}
+const FOTO_OBRIGATORIA_MSG = "Envie sua foto de perfil em Menu → Foto do perfil para ficar online.";
+
 // ── POST /motorista-app/status-online ─────────────────────────────────────────
 // Driver toggles online/offline without sending location.
 router.post("/status-online", async (req: Request, res: Response) => {
@@ -2644,6 +2751,10 @@ router.post("/status-online", async (req: Request, res: Response) => {
     if (!motoristaId) return res.status(401).json({ error: "invalid_token" });
 
     const { online } = req.body;
+    if (online && await bloqueioSemFoto(motoristaId)) {
+      await db.execute(sql`UPDATE motoristas_app SET online = false WHERE id = ${motoristaId}`);
+      return res.status(403).json({ error: "foto_obrigatoria", message: FOTO_OBRIGATORIA_MSG });
+    }
     await db.execute(sql`
       UPDATE motoristas_app SET online = ${!!online}, ultimo_ping = NOW() WHERE id = ${motoristaId}
     `);

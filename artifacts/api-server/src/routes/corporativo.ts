@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { sendFcmNotification } from "./motorista-app";
 import { gerarComissaoCliente } from "../lib/comissaoAfiliado";
+import { ensureViagemSchema, filtroGeneroSql } from "../lib/viagemMulher";
 import { ensureDestinoMotorista, destinoCompativelSql } from "../lib/motoristaDestino";
 
 const router: Router = Router();
@@ -547,6 +548,7 @@ router.post("/corridas/:id/chamar-motorista", async (req, res) => {
 
     // 1º busca motoristas online no raio — só cria a corrida se houver alguém
     await ensureDestinoMotorista();
+    await ensureViagemSchema();
     const drvR = await db.execute(`
       SELECT ma.id, ma.nome, ma.fcm_token, ma.lat, ma.lng,
         (6371 * acos(LEAST(1.0,
@@ -559,6 +561,7 @@ router.post("/corridas/:id/chamar-motorista", async (req, res) => {
         AND ma.ultimo_ping > NOW() - INTERVAL '3 minutes'
         AND ma.status = 'aprovado'
         AND ${destinoCompativelSql(latD, lngD)}
+        ${filtroGeneroSql(false, false)}
       HAVING (6371 * acos(LEAST(1.0,
           cos(radians(${latO})) * cos(radians(ma.lat)) *
           cos(radians(ma.lng) - radians(${lngO})) +

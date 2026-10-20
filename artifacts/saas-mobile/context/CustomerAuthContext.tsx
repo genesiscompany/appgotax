@@ -41,6 +41,7 @@ export type Customer = {
   formaPagamento: FormaPagamento;
   codigoReferral?: string | null;
   isAfiliado?: boolean;
+  genero?: "feminino" | "masculino" | null;
 };
 
 type CustomerAuthContextType = {
@@ -48,7 +49,8 @@ type CustomerAuthContextType = {
   isLoaded: boolean;
   isLoggedIn: boolean;
   login: (whatsapp: string, senha: string) => Promise<{ ok: boolean; error?: string }>;
-  register: (nome: string, whatsapp: string, senha: string, indicadoPor?: string) => Promise<{ ok: boolean; error?: string }>;
+  register: (nome: string, whatsapp: string, senha: string, indicadoPor?: string, genero?: "feminino" | "masculino") => Promise<{ ok: boolean; error?: string }>;
+  definirGenero: (genero: "feminino" | "masculino") => Promise<{ ok: boolean; error?: string }>;
   updateProfile: (data: { nome?: string; whatsapp?: string; novaSenha?: string; endereco?: string; formaPagamento?: FormaPagamento }) => Promise<{ ok: boolean; error?: string }>;
   uploadAvatar: (uri: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
@@ -95,6 +97,7 @@ export function CustomerAuthProvider({ children }: { children: React.ReactNode }
               formaPagamento: (data.usuario?.forma_pagamento ?? c.formaPagamento) as FormaPagamento,
               codigoReferral: data.usuario?.codigo_referral ?? c.codigoReferral ?? null,
               isAfiliado: !!data.usuario?.is_afiliado,
+              genero: data.usuario?.genero ?? null,
             };
             await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
             if (!cancelled) { setCustomer(fresh); setIsLoaded(true); }
@@ -139,6 +142,7 @@ export function CustomerAuthProvider({ children }: { children: React.ReactNode }
         formaPagamento: data.usuario.forma_pagamento ?? null,
         codigoReferral: data.usuario.codigo_referral ?? null,
         isAfiliado: !!data.usuario.is_afiliado,
+        genero: data.usuario.genero ?? null,
       });
       return { ok: true };
     } catch {
@@ -146,7 +150,7 @@ export function CustomerAuthProvider({ children }: { children: React.ReactNode }
     }
   }, []);
 
-  const register = useCallback(async (nome: string, whatsapp: string, senha: string, indicadoPor?: string) => {
+  const register = useCallback(async (nome: string, whatsapp: string, senha: string, indicadoPor?: string, genero?: "feminino" | "masculino") => {
     if (!nome.trim() || nome.trim().length < 3) return { ok: false, error: "Nome deve ter ao menos 3 caracteres" };
     const num = whatsapp.replace(/\D/g, "");
     if (num.length < 10) return { ok: false, error: "WhatsApp inválido" };
@@ -156,7 +160,7 @@ export function CustomerAuthProvider({ children }: { children: React.ReactNode }
       const res = await fetch(`${API_BASE}/auth/cliente-register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nome: nome.trim(), telefone: num, senha, indicado_por: indicado }),
+        body: JSON.stringify({ nome: nome.trim(), telefone: num, senha, indicado_por: indicado, genero }),
       });
       const data = await res.json();
       if (!res.ok) return { ok: false, error: data.message || "Erro ao cadastrar" };
@@ -170,6 +174,7 @@ export function CustomerAuthProvider({ children }: { children: React.ReactNode }
         formaPagamento: data.usuario.forma_pagamento ?? null,
         codigoReferral: data.usuario.codigo_referral ?? null,
         isAfiliado: !!data.usuario.is_afiliado,
+        genero: data.usuario.genero ?? null,
       });
       return { ok: true };
     } catch {
@@ -229,12 +234,29 @@ export function CustomerAuthProvider({ children }: { children: React.ReactNode }
     }
   }, [customer]);
 
+  const definirGenero = useCallback(async (genero: "feminino" | "masculino") => {
+    if (!customer) return { ok: false, error: "Não autenticado" };
+    try {
+      const res = await fetch(`${API_BASE}/auth/cliente-perfil`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: customer.token, genero }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: json.message || "Erro ao salvar" };
+      await save({ ...customer, genero: json.usuario?.genero ?? genero });
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "Sem conexão com o servidor" };
+    }
+  }, [customer]);
+
   const logout = useCallback(async () => { await save(null); }, []);
 
   return (
     <CustomerAuthContext.Provider value={{
       customer, isLoaded, isLoggedIn: !!customer,
-      login, register, logout, updateProfile, uploadAvatar,
+      login, register, logout, updateProfile, uploadAvatar, definirGenero,
     }}>
       {children}
     </CustomerAuthContext.Provider>

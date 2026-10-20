@@ -5,6 +5,7 @@ import Constants from "expo-constants";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useProAuth, PRO_COLORS, PRO_JOB, PRO_ICONS } from "@/context/ProAuthContext";
 import RideRequestOverlay from "@/components/RideRequestOverlay";
+import GeneroProGate from "@/components/GeneroProGate";
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
   ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`
@@ -223,6 +224,7 @@ export default function ProTabsLayout() {
             entregaEndereco: pendente?.entrega_endereco ?? pendente?.destino_endereco ?? "",
             categoriaName: pendente?.categoria_nome ?? "",
             valorEstimado: String(pendente?.valor_estimado ?? "0"),
+            taxaCancelamento: String(pendente?.taxa_cancelamento ?? "0"),
             clienteNome: pendente?.cliente_nome ?? "Cliente",
             descricaoItem: pendente?.descricao_item ?? "",
             tipoServico: pendente?.tipo_servico ?? "entrega",
@@ -242,6 +244,7 @@ export default function ProTabsLayout() {
             destinoEndereco: pendente?.destino_endereco ?? "",
             categoriaName: pendente?.categoria_nome ?? "",
             valorEstimado: String(pendente?.valor_estimado ?? "0"),
+            taxaCancelamento: String(pendente?.taxa_cancelamento ?? "0"),
             clienteNome: pendente?.cliente_nome ?? "Cliente",
             paymentSource: pendente?.paymentSource ?? pendente?.source ?? pendente?.payment_source ?? "direto",
             formaPagamento: pendente?.forma_pagamento ?? "",
@@ -295,6 +298,7 @@ export default function ProTabsLayout() {
           options={{ tabBarIcon: ({ color }) => <TabIcon icon="☰" label="Menu" color={color} /> }} />
       </Tabs>
 
+      <GeneroProGate />
       <RideRequestOverlay
         corrida={corridaPendente}
         onAceitar={handleAceitar}

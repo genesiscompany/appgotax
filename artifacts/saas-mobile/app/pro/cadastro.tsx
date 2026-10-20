@@ -6,6 +6,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { useProAuth, TipoPro, PRO_COLORS, PRO_LABELS, PRO_ICONS } from "@/context/ProAuthContext";
+import { GeneroOpcoes, type Genero } from "@/components/GeneroObrigatorio";
 
 const TIPOS: TipoPro[] = ["motorista", "entregador", "delivery"];
 
@@ -23,6 +24,7 @@ export default function ProCadastro() {
   const [cpf, setCpf] = useState("");
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
+  const [genero, setGenero] = useState<Genero | null>(null);
   const [loading, setLoading] = useState(false);
 
   const formatTel = (v: string) => {
@@ -37,8 +39,9 @@ export default function ProCadastro() {
     if (!telefone) return Alert.alert("Atenção", "Informe seu telefone.");
     if (pin.length < 4) return Alert.alert("PIN inválido", "O PIN deve ter exatamente 4 dígitos.");
     if (pin !== pinConfirm) return Alert.alert("PIN inválido", "Os PINs não coincidem.");
+    if (!genero) return Alert.alert("Atenção", "Escolha Feminino ou Masculino.");
     setLoading(true);
-    const result = await cadastro({ nome: nome.trim(), telefone, cpf, pin, tipo_profissional: tipo });
+    const result = await cadastro({ nome: nome.trim(), telefone, cpf, pin, tipo_profissional: tipo, genero });
     setLoading(false);
     if (!result.ok) return Alert.alert("Erro no cadastro", result.error || "Tente novamente.");
     router.replace("/pro" as any);
@@ -77,6 +80,9 @@ export default function ProCadastro() {
               </View>
             </TouchableOpacity>
           ))}
+
+          <Text style={styles.sectionLabel}>Você é:</Text>
+          <GeneroOpcoes valor={genero} onChange={setGenero} cor={cor} escuro />
 
           {/* Dados pessoais */}
           <Text style={styles.sectionLabel}>Seus dados</Text>

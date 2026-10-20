@@ -9,6 +9,9 @@ import { router, useFocusEffect } from "expo-router";
 import DefinirDestino, { useDestino } from "@/components/DefinirDestino";
 import Financeiro from "@/components/Financeiro";
 import AfiliadoPro from "@/components/AfiliadoPro";
+import FotoPerfilPro from "@/components/FotoPerfilPro";
+import PassageirosPro from "@/components/PassageirosPro";
+import { fotoUrl } from "@/utils/fotoUrl";
 import * as ImagePicker from "expo-image-picker";
 import QRCode from "react-native-qrcode-svg";
 import { useProAuth, PRO_COLORS, PRO_LABELS, PRO_ICONS } from "@/context/ProAuthContext";
@@ -384,7 +387,7 @@ function buildPixImgUrl(pixImagem: string, apiBase: string) {
   return `${base}${pixImagem}`;
 }
 
-type TelaMenu = "documentos" | "dados" | "recebimentos" | "pix" | "veiculo" | "indicacao" | "destino" | "financeiro";
+type TelaMenu = "documentos" | "dados" | "recebimentos" | "pix" | "veiculo" | "indicacao" | "destino" | "financeiro" | "foto" | "passageiros";
 
 const TELA_TITULOS: Record<TelaMenu, string> = {
   documentos: "Documentos",
@@ -395,6 +398,8 @@ const TELA_TITULOS: Record<TelaMenu, string> = {
   indicacao: "Indicação",
   destino: "Definir destino",
   financeiro: "Financeiro",
+  foto: "Foto do perfil",
+  passageiros: "Passageiros",
 };
 
 function formatBRL(v: number | string | null | undefined) {
@@ -702,6 +707,16 @@ export default function ProPerfil() {
 
   const menuItens: { key: string; icon: string; title: string; subtitle?: string; alerta?: boolean; onPress: () => void }[] = [
     {
+      key: "foto", icon: "📷", title: "Foto do perfil",
+      subtitle: proUser.foto ? "✓ Foto enviada" : "⚠️ Obrigatória para ficar online",
+      alerta: !proUser.foto, onPress: () => abrirTela("foto"),
+    },
+    ...(proUser.tipo_profissional === "motorista" && proUser.genero === "feminino" ? [{
+      key: "passageiros", icon: "👩", title: "Passageiros",
+      subtitle: proUser.aceita_passageiros === "somente_mulheres" ? "Somente mulheres" : "Todos",
+      onPress: () => abrirTela("passageiros"),
+    }] : []),
+    {
       key: "documentos", icon: "📄", title: "Documentos",
       subtitle: docsAlerta ? `⚠️ ${docs.length - docsAprovados} pendente(s)` : `✓ ${docsAprovados} aprovados`,
       alerta: docsAlerta, onPress: () => abrirTela("documentos"),
@@ -739,7 +754,9 @@ export default function ProPerfil() {
         {/* Header */}
         <View style={styles.header}>
           <View style={[styles.avatar, { borderColor: cor }]}>
-            <Text style={styles.avatarIcon}>{PRO_ICONS[proUser.tipo_profissional]}</Text>
+            {fotoUrl(proUser.foto)
+              ? <Image source={{ uri: fotoUrl(proUser.foto)! }} style={{ width: 54, height: 54, borderRadius: 15 }} />
+              : <Text style={styles.avatarIcon}>{PRO_ICONS[proUser.tipo_profissional]}</Text>}
           </View>
           <View style={{ flex: 1 }}>
             <Text style={styles.nome}>{proUser.nome}</Text>
@@ -1069,6 +1086,12 @@ export default function ProPerfil() {
               )}
               {tela === "financeiro" && !!proUser.token && (
                 <Financeiro token={proUser.token} cor={cor} />
+              )}
+              {tela === "foto" && !!proUser.token && (
+                <FotoPerfilPro token={proUser.token} foto={proUser.foto} cor={cor} onAtualizado={refreshPerfil} />
+              )}
+              {tela === "passageiros" && !!proUser.token && (
+                <PassageirosPro token={proUser.token} valor={proUser.aceita_passageiros} cor={cor} onSalvo={v => updateLocal({ aceita_passageiros: v })} />
               )}
               {tela === "destino" && !!proUser.token && (
                 <DefinirDestino token={proUser.token} cor={cor} onChange={setDestinoInfo} />

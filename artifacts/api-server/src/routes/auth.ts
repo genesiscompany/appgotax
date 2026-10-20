@@ -8,6 +8,7 @@ import fs from "fs";
 import { uploadImageToGCS } from "../lib/uploadImage";
 import { issueCustomerToken, verifyCustomerToken } from "../lib/customerToken";
 import { normalizarTelefone, telefoneNormalizadoSql } from "../lib/telefone";
+import { ensureViagemSchema, normalizarGenero } from "../lib/viagemMulher";
 
 const UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -79,6 +80,19 @@ router.patch("/cliente-perfil", async (req, res) => {
     const userId = verifyCustomerToken(token);
     if (!userId) return res.status(401).json({ error: "unauthorized", message: "Token inválido ou expirado" });
 
+    await ensureViagemSchema();
+    let generoDefinido = false;
+    if (req.body.genero !== undefined) {
+      const genero = normalizarGenero(req.body.genero);
+      if (!genero) return res.status(400).json({ error: "bad_request", message: "Escolha Feminino ou Masculino" });
+      const atual = (await db.execute(sql`SELECT genero FROM usuarios WHERE id = ${userId}`)).rows[0] as any;
+      if (atual?.genero && atual.genero !== genero) {
+        return res.status(409).json({ error: "conflict", message: "O gênero já foi definido. Para alterar, fale com o suporte." });
+      }
+      await db.execute(sql`UPDATE usuarios SET genero = ${genero} WHERE id = ${userId} AND genero IS NULL`);
+      generoDefinido = true;
+    }
+
     const drizzleUpdates: Record<string, string | null> = {};
     if (nome?.trim()) drizzleUpdates.nome = nome.trim();
     if (telefone) drizzleUpdates.telefone = normalizarTelefone(telefone);
@@ -86,7 +100,7 @@ router.patch("/cliente-perfil", async (req, res) => {
     if (endereco !== undefined) drizzleUpdates.endereco = endereco || null;
     if (formaPagamento !== undefined) drizzleUpdates.formaPagamento = formaPagamento || null;
 
-    if (Object.keys(drizzleUpdates).length === 0) {
+    if (Object.keys(drizzleUpdates).length === 0 && !generoDefinido) {
       return res.status(400).json({ error: "bad_request", message: "Nenhum campo para atualizar" });
     }
 
@@ -97,7 +111,10 @@ router.patch("/cliente-perfil", async (req, res) => {
       }
     }
 
-    await db.update(usuariosTable).set(drizzleUpdates as any).where(eq(usuariosTable.id, userId));
+    if (Object.keys(drizzleUpdates).length > 0) {
+      await db.update(usuariosTable).set(drizzleUpdates as any).where(eq(usuariosTable.id, userId));
+    }
+    const generoRow = (await db.execute(sql`SELECT genero FROM usuarios WHERE id = ${userId}`)).rows[0] as any;
 
     const [updated] = await db.select().from(usuariosTable).where(eq(usuariosTable.id, userId)).limit(1);
     return res.json({
@@ -108,6 +125,7 @@ router.patch("/cliente-perfil", async (req, res) => {
         avatar: updated.avatar,
         endereco: updated.endereco,
         forma_pagamento: updated.formaPagamento,
+        genero: generoRow?.genero ?? null,
       }
     });
   } catch (err) {
@@ -125,8 +143,9 @@ router.get("/cliente-validar", async (req, res) => {
     if (!userId || userId <= 0) return res.status(401).json({ error: "unauthorized" });
     const [usuario] = await db.select().from(usuariosTable).where(eq(usuariosTable.id, userId)).limit(1);
     if (!usuario || usuario.papel !== "cliente") return res.status(401).json({ error: "unauthorized", message: "Cadastro não encontrado" });
+    await ensureViagemSchema();
     const refRow = (await db.execute(sql`
-      SELECT u.codigo_referral, EXISTS(SELECT 1 FROM afiliados a WHERE a.usuario_id = u.id) AS is_afiliado
+      SELECT u.codigo_referral, u.genero, EXISTS(SELECT 1 FROM afiliados a WHERE a.usuario_id = u.id) AS is_afiliado
       FROM usuarios u WHERE u.id = ${usuario.id}
     `)).rows[0] as any;
     return res.json({
@@ -140,6 +159,7 @@ router.get("/cliente-validar", async (req, res) => {
         forma_pagamento: usuario.formaPagamento,
         codigo_referral: refRow?.codigo_referral ?? null,
         is_afiliado: !!refRow?.is_afiliado,
+        genero: refRow?.genero ?? null,
       },
     });
   } catch (err) {
@@ -165,8 +185,9 @@ router.post("/cliente-login", async (req, res) => {
       return res.status(401).json({ error: "unauthorized", message: "Senha incorreta" });
     }
     const token = issueCustomerToken(usuario.id);
+    await ensureViagemSchema();
     const referralRow = (await db.execute(sql`
-      SELECT u.codigo_referral, EXISTS(SELECT 1 FROM afiliados a WHERE a.usuario_id = u.id) AS is_afiliado
+      SELECT u.codigo_referral, u.genero, EXISTS(SELECT 1 FROM afiliados a WHERE a.usuario_id = u.id) AS is_afiliado
       FROM usuarios u WHERE u.id = ${usuario.id}
     `)).rows[0] as any;
     return res.json({
@@ -180,6 +201,7 @@ router.post("/cliente-login", async (req, res) => {
         forma_pagamento: usuario.formaPagamento,
         codigo_referral: referralRow?.codigo_referral ?? null,
         is_afiliado: !!referralRow?.is_afiliado,
+        genero: referralRow?.genero ?? null,
       },
     });
   } catch (err) {
@@ -208,6 +230,7 @@ function gerarCodigoReferralU(nome: string, id: number): string {
 router.post("/cliente-register", async (req, res) => {
   try {
     const { nome, telefone, senha, indicado_por } = req.body;
+    const genero = normalizarGenero(req.body.genero);
     if (!nome || !telefone || !senha) {
       return res.status(400).json({ error: "bad_request", message: "Dados obrigatórios ausentes" });
     }
@@ -215,6 +238,7 @@ router.post("/cliente-register", async (req, res) => {
       return res.status(400).json({ error: "bad_request", message: "Senha deve ter ao menos 4 caracteres" });
     }
     await ensureUsuariosReferral();
+    await ensureViagemSchema();
     const num = normalizarTelefone(telefone);
     if (num.length < 8) {
       return res.status(400).json({ error: "bad_request", message: "Telefone inválido" });
@@ -234,6 +258,7 @@ router.post("/cliente-register", async (req, res) => {
     }).returning();
     const codigo_referral = gerarCodigoReferralU(novoUsuario.nome, novoUsuario.id);
     await db.execute(sql`UPDATE usuarios SET codigo_referral = ${codigo_referral}, indicado_por = ${indicado_por || null} WHERE id = ${novoUsuario.id} AND codigo_referral IS NULL`);
+    if (genero) await db.execute(sql`UPDATE usuarios SET genero = ${genero} WHERE id = ${novoUsuario.id}`);
     const token = issueCustomerToken(novoUsuario.id);
     return res.status(201).json({
       token,
@@ -246,6 +271,7 @@ router.post("/cliente-register", async (req, res) => {
         forma_pagamento: novoUsuario.formaPagamento,
         codigo_referral,
         is_afiliado: false,
+        genero,
       },
     });
   } catch (err: any) {

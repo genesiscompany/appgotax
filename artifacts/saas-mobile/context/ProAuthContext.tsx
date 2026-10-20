@@ -45,6 +45,8 @@ export interface ProUser {
   codigo_referral?: string | null;
   aceita_pagamento_direto?: boolean;
   aceita_pagamento_app?: boolean;
+  genero?: "feminino" | "masculino" | null;
+  aceita_passageiros?: "todos" | "somente_mulheres";
 }
 
 interface ProAuthContextType {
@@ -56,7 +58,7 @@ interface ProAuthContextType {
   login: (telefone: string, pin: string) => Promise<{ ok: boolean; error?: string }>;
   cadastro: (data: {
     nome: string; telefone: string; pin: string;
-    cpf?: string; tipo_profissional: TipoPro;
+    cpf?: string; tipo_profissional: TipoPro; genero?: "feminino" | "masculino";
   }) => Promise<{ ok: boolean; error?: string }>;
   logout: () => Promise<void>;
   refreshPerfil: () => Promise<void>;
@@ -92,11 +94,18 @@ export function ProAuthProvider({ children }: { children: React.ReactNode }) {
     const user = proUserRef.current;
     if (!user?.token) return;
     try {
-      await fetch(`${API_BASE}/motorista-app/status-online`, {
+      const r = await fetch(`${API_BASE}/motorista-app/status-online`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${user.token}` },
         body: JSON.stringify({ online: true }),
       });
+      if (r.status === 403) {
+        const d = await r.json().catch(() => ({}));
+        if (d?.error === "foto_obrigatoria") {
+          setOnline(false);
+          Alert.alert("Foto obrigatória", d.message || "Envie sua foto de perfil em Menu → Foto do perfil para ficar online.");
+        }
+      }
     } catch {}
   }, []);
 
@@ -185,7 +194,7 @@ export function ProAuthProvider({ children }: { children: React.ReactNode }) {
 
   const cadastro = useCallback(async (form: {
     nome: string; telefone: string; pin: string;
-    cpf?: string; tipo_profissional: TipoPro;
+    cpf?: string; tipo_profissional: TipoPro; genero?: "feminino" | "masculino";
   }) => {
     const url = `${API_BASE}/motorista-app/cadastro`;
     try {

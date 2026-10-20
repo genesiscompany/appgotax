@@ -23,6 +23,8 @@ interface Motorista {
   avaliacao_media: number;
   criado_em: string;
   categorias_habilitadas?: { categoria_id: number; categoria_nome: string }[];
+  genero?: string | null;
+  foto?: string | null;
 }
 
 const STATUS_CONF: Record<string, { label: string; color: string; bg: string }> = {
@@ -303,6 +305,20 @@ export default function Motoristas() {
     setUpdatingId(null);
   };
 
+  const handleGenero = async (id: number, genero: string) => {
+    if (!genero) return;
+    try {
+      const res = await fetch(`${API}/motorista-app/admin/${id}/genero`, {
+        method: "PATCH", headers,
+        body: JSON.stringify({ genero }),
+      });
+      if (!res.ok) { alert("Não foi possível alterar o gênero."); return; }
+      setMotoristas(prev => prev.map(m => (m.id === id ? { ...m, genero } : m)));
+    } catch (_) {
+      alert("Falha de conexão.");
+    }
+  };
+
   const handleDocStatus = async (id: number, tipo: string, status: string) => {
     try {
       await fetch(`${API}/motorista-app/admin/${id}/documentos/${tipo}/status`, {
@@ -396,9 +412,11 @@ export default function Motoristas() {
                   <div className="flex items-start justify-between gap-4 flex-wrap">
                     {/* Driver info */}
                     <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shrink-0"
+                      <div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shrink-0 overflow-hidden"
                         style={{ backgroundColor: conf.color }}>
-                        {m.nome.charAt(0).toUpperCase()}
+                        {m.foto
+                          ? <img src={m.foto} alt={m.nome} className="w-full h-full object-cover" />
+                          : m.nome.charAt(0).toUpperCase()}
                       </div>
                       <div>
                         <div className="flex items-center gap-2 flex-wrap">
@@ -416,6 +434,19 @@ export default function Motoristas() {
                           </span>
                         </div>
                         <p className="text-sm text-muted-foreground mt-0.5">{m.telefone}{m.email ? ` · ${m.email}` : ""}</p>
+                        <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                          <span>Gênero:</span>
+                          <select
+                            value={m.genero || ""}
+                            onChange={e => handleGenero(m.id, e.target.value)}
+                            className="text-xs border border-border rounded-md px-2 py-0.5 bg-background text-foreground"
+                          >
+                            <option value="" disabled>Não informado</option>
+                            <option value="feminino">Feminino</option>
+                            <option value="masculino">Masculino</option>
+                          </select>
+                          {!m.foto && <span className="text-red-500 font-medium">· sem foto</span>}
+                        </div>
                         {m.veiculo_modelo && (
                           <p className="text-sm text-muted-foreground">
                             {m.veiculo_marca} {m.veiculo_modelo}{m.veiculo_ano ? ` (${m.veiculo_ano})` : ""}{m.veiculo_placa ? ` · ${m.veiculo_placa}` : ""}

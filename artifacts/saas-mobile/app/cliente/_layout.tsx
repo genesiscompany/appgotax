@@ -1,6 +1,7 @@
 import { Stack } from "expo-router";
 import { useGlobalPushNotifications } from "@/hooks/usePushNotifications";
 import { CartProvider } from "@/context/CartContext";
+import GeneroClienteGate from "@/components/GeneroClienteGate";
 
 function PushNotificationRegistrar() {
   useGlobalPushNotifications();
@@ -11,6 +12,7 @@ export default function ClienteLayout() {
   return (
     <CartProvider>
       <PushNotificationRegistrar />
+      <GeneroClienteGate />
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="index" />
         <Stack.Screen name="motorista" />

@@ -3,17 +3,18 @@ import { useAuth, authHeaders } from "@/lib/auth";
 import { useLocation } from "wouter";
 import { FileText, Shield, Users, Save, ExternalLink, CheckCircle, ChevronDown, ChevronUp, Car, Wallet, AlertCircle, Loader2 } from "lucide-react";
 
-type Tab = "politica" | "termos" | "afiliados" | "caronas" | "mercadopago";
+type Tab = "politica" | "termos" | "afiliados" | "corridas" | "caronas" | "mercadopago";
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "politica", label: "Política de Privacidade", icon: Shield },
   { id: "termos", label: "Termos de Uso", icon: FileText },
   { id: "afiliados", label: "Regras de Afiliados", icon: Users },
+  { id: "corridas", label: "Corridas", icon: Car },
   { id: "caronas", label: "Viagens Compartilhadas", icon: Car },
   { id: "mercadopago", label: "Mercado Pago (Beta)", icon: Wallet },
 ];
 
-const PROD_BASE = "https://api.gotaxi.com.br";
+const PROD_BASE = "https://admin.gotaxi.com.br";
 const CONFIG_API = "/api/configuracoes/admin";
 const PAYMENTS_API_BASE = (() => {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -51,6 +52,9 @@ export default function ConfiguracoesSistema() {
     afiliados_requisitos: "",
     caronas_valor_por_km: "0.80",
     caronas_taxa_plataforma: "5",
+    taxa_cancelamento_valor: "0",
+    taxa_cancelamento_minutos: "2",
+    foto_motorista_obrigatoria: "0",
   });
   const [afiliados, setAfiliados] = useState({ percentual_comissao: 10, valor_minimo_saque: 50 });
   const [showPreview, setShowPreview] = useState(false);
@@ -415,6 +419,61 @@ export default function ConfiguracoesSistema() {
 
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
             <strong>Atenção:</strong> Alterações no percentual de comissão afetam apenas novas comissões geradas após o salvamento.
+          </div>
+        </div>
+      )}
+
+      {/* Corridas: taxa de cancelamento e foto do motorista */}
+      {tab === "corridas" && (
+        <div className="space-y-5">
+          <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-1">Taxa de Cancelamento</h2>
+            <p className="text-sm text-muted-foreground mb-5">
+              Cobrada quando o passageiro cancela depois do tempo de tolerância, contado a partir do aceite do motorista.
+              A taxa é somada à próxima corrida do passageiro e creditada ao motorista que perdeu a viagem. Valor 0 desliga a cobrança.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div>
+                <label className="block text-sm font-medium mb-1.5">Valor da taxa (R$)</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 text-sm">R$</span>
+                  <input
+                    type="number" step="0.01" min="0"
+                    value={sistema.taxa_cancelamento_valor}
+                    onChange={e => setSistema(s => ({ ...s, taxa_cancelamento_valor: e.target.value }))}
+                    className="w-full pl-10 pr-4 py-2.5 border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                    placeholder="5.00"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1.5">Tolerância (minutos após o aceite)</label>
+                <input
+                  type="number" step="1" min="0"
+                  value={sistema.taxa_cancelamento_minutos}
+                  onChange={e => setSistema(s => ({ ...s, taxa_cancelamento_minutos: e.target.value }))}
+                  className="w-full px-4 py-2.5 border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  placeholder="2"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-1">Foto do motorista</h2>
+            <p className="text-sm text-muted-foreground mb-4">
+              O app novo já não deixa o motorista ficar online sem foto. Ative esta opção depois que todos atualizarem o app,
+              para o servidor também bloquear quem ainda usa a versão antiga sem foto.
+            </p>
+            <label className="flex items-center gap-3 text-sm">
+              <input
+                type="checkbox"
+                checked={["1", "true"].includes(String(sistema.foto_motorista_obrigatoria))}
+                onChange={e => setSistema(s => ({ ...s, foto_motorista_obrigatoria: e.target.checked ? "1" : "0" }))}
+                className="w-4 h-4"
+              />
+              Bloquear no servidor motoristas sem foto
+            </label>
           </div>
         </div>
       )}

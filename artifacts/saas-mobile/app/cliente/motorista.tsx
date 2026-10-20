@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View, Text, StyleSheet, Pressable, useColorScheme, Platform,
   TextInput, ScrollView, ActivityIndicator, TouchableOpacity, Alert,
-  Modal, FlatList, KeyboardAvoidingView,
+  Modal, FlatList, KeyboardAvoidingView, Image,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -17,6 +17,7 @@ import { useAuthGate } from "@/components/AuthGate";
 import { useCustomerAuth } from "@/context/CustomerAuthContext";
 import { checkoutPayment, getPaymentOptions, getSavedCard, getServicePaymentStatus, type PaymentOptions, type SavedCard } from "@/api/payments";
 import MercadoPagoCardTokenizer from "@/components/MercadoPagoCardTokenizer";
+import { fotoUrl } from "@/utils/fotoUrl";
 import { getSavedCardConfig, type SavedCardConfig } from "@/api/payments";
 
 const MOD_COLOR = Colors.modules.motorista;
@@ -122,6 +123,9 @@ export default function ClienteMotorista() {
   const [savedCardTokenizerVisible, setSavedCardTokenizerVisible] = useState(false);
   
   const [estado, setEstado] = useState<"idle" | "buscando" | "aguardando" | "caminho" | "chegou">("idle");
+  const passageiraMulher = customer?.genero === "feminino";
+  const [somenteMulher, setSomenteMulher] = useState(false);
+  const [taxaInfo, setTaxaInfo] = useState<{ valor: number; minutos: number; pendente: number } | null>(null);
   const [corridaId, setCorridaId] = useState<number | null>(null);
   const [corridaData, setCorridaData] = useState<any>(null);
   const [servicePaymentReferenceId, setServicePaymentReferenceId] = useState<number | null>(null);
@@ -427,6 +431,7 @@ export default function ClienteMotorista() {
             lng_destino: destinoLatLng.lng,
             categoria_nome: catSelecionada.nome,
             payment_source: paymentPayload(pagamento).payment_source,
+            somente_mulher: passageiraMulher && somenteMulher,
           }),
         });
         if (!response.ok) throw new Error("quote_unavailable");
@@ -450,9 +455,17 @@ export default function ClienteMotorista() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [origemLatLng, destinoLatLng, destinoText, catSelecionada, pagamento, customer?.token]);
+  }, [origemLatLng, destinoLatLng, destinoText, catSelecionada, pagamento, customer?.token, passageiraMulher, somenteMulher]);
 
   const { requireAuth } = useAuthGate("/cliente/motorista");
+
+  useEffect(() => {
+    if (!customer?.token || estado !== "idle") return;
+    fetch(`${API_BASE}/motorista/taxa-cancelamento`, { headers: { Authorization: `Bearer ${customer.token}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (d) setTaxaInfo({ valor: Number(d.valor) || 0, minutos: Number(d.minutos) || 0, pendente: Number(d.pendente) || 0 }); })
+      .catch(() => {});
+  }, [customer?.token, estado]);
 
   // Driver position is updated from the real GPS poll (pollStatus), not via fake animation
 
@@ -604,6 +617,7 @@ export default function ClienteMotorista() {
           lng_origem: origemLatLng.lng,
           lat_destino: destinoLatLng.lat,
           lng_destino: destinoLatLng.lng,
+          somente_mulher: passageiraMulher && somenteMulher,
         };
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
@@ -684,7 +698,24 @@ export default function ClienteMotorista() {
     });
   };
 
-  const handleCancelar = async () => {
+  const handleCancelar = () => {
+    const taxa = Number(corridaData?.taxa_cancelamento_valor ?? 0);
+    const seg = corridaData?.taxa_cancelamento_segundos;
+    if (estado === "caminho" && taxa > 0 && seg != null && Number(seg) <= 0) {
+      Alert.alert(
+        "Cancelar corrida?",
+        `O tempo de cancelamento grátis acabou. Será cobrada uma taxa de R$ ${taxa.toFixed(2).replace(".", ",")}, somada à sua próxima corrida.`,
+        [
+          { text: "Voltar", style: "cancel" },
+          { text: "Cancelar mesmo assim", style: "destructive", onPress: () => { executarCancelamento(); } },
+        ],
+      );
+      return;
+    }
+    executarCancelamento();
+  };
+
+  const executarCancelamento = async () => {
     if (corridaId) {
       try {
         if (!customer?.token) throw new Error("unauthorized");
@@ -699,6 +730,10 @@ export default function ClienteMotorista() {
           const error = await response.json().catch(() => ({}));
           Alert.alert("Não foi possível cancelar", error.message || "A corrida já está sendo finalizada.");
           return;
+        }
+        const cancelData = await response.json().catch(() => ({}));
+        if (Number(cancelData.taxa_cancelamento) > 0) {
+          Alert.alert("Corrida cancelada", `Taxa de cancelamento de R$ ${Number(cancelData.taxa_cancelamento).toFixed(2).replace(".", ",")} será somada à sua próxima corrida.`);
         }
       } catch (_) {
         Alert.alert("Não foi possível cancelar", "Verifique sua conexão e tente novamente.");
@@ -786,6 +821,18 @@ export default function ClienteMotorista() {
       : `Pagamento direto${pagamentoAtual ? ` • ${String(pagamentoAtual).toUpperCase()}` : ""}`;
   const motoristaRating = corridaData?.motorista_avaliacao ?? corridaData?.ma_avaliacao ?? "4.9";
   const motoristaIniciais = motoristaNome.split(" ").map((n: string) => n[0]).slice(0, 2).join("").toUpperCase();
+  const motoristaFoto = fotoUrl(corridaData?.motorista_foto);
+  const taxaValor = Number(corridaData?.taxa_cancelamento_valor ?? taxaInfo?.valor ?? 0);
+  const taxaMin = Number(corridaData?.taxa_cancelamento_minutos ?? taxaInfo?.minutos ?? 2);
+  const taxaSeg = corridaData?.taxa_cancelamento_segundos;
+  const fmtTaxa = `R$ ${taxaValor.toFixed(2).replace(".", ",")}`;
+  const taxaAviso = taxaValor > 0
+    ? taxaSeg == null
+      ? { alerta: false, texto: `Cancelamento grátis até ${taxaMin} min depois que o motorista aceitar. Depois, taxa de ${fmtTaxa}.` }
+      : Number(taxaSeg) > 0
+        ? { alerta: false, texto: `Cancelamento grátis por mais ${Math.ceil(Number(taxaSeg) / 60)} min. Depois, taxa de ${fmtTaxa}.` }
+        : { alerta: true, texto: `Cancelar agora gera taxa de ${fmtTaxa}, cobrada na sua próxima corrida.` }
+    : null;
   if (estado === "caminho") {
     return (
       <>
@@ -837,8 +884,10 @@ export default function ClienteMotorista() {
           {/* Card do motorista */}
           <View style={[styles.driverCard, { backgroundColor: isDark ? "#1e293b" : "#f8fafc", borderColor: isDark ? "#334155" : "#e2e8f0" }]}>
             {/* Avatar */}
-            <View style={[styles.driverAvatarWrap, { backgroundColor: MOD_COLOR }]}>
-              <Text style={[styles.driverInitials, { fontFamily: "Inter_700Bold" }]}>{motoristaIniciais}</Text>
+            <View style={[styles.driverAvatarWrap, { backgroundColor: MOD_COLOR, overflow: "hidden" }]}>
+              {motoristaFoto
+                ? <Image source={{ uri: motoristaFoto }} style={{ width: "100%", height: "100%" }} />
+                : <Text style={[styles.driverInitials, { fontFamily: "Inter_700Bold" }]}>{motoristaIniciais}</Text>}
             </View>
 
             {/* Info */}
@@ -885,6 +934,13 @@ export default function ClienteMotorista() {
               <Text style={[styles.routeTextItem, { color: colors.text, fontFamily: "Inter_500Medium" }]}>{destinoText}</Text>
             </View>
           </View>
+
+          {taxaAviso && (
+            <View style={[styles.taxaAviso, { backgroundColor: taxaAviso.alerta ? "#FEF2F2" : (isDark ? "#1e293b" : "#F8FAFC"), borderColor: taxaAviso.alerta ? "#FECACA" : colors.border }]}>
+              <Feather name="info" size={14} color={taxaAviso.alerta ? "#EF4444" : colors.textSecondary} />
+              <Text style={[styles.taxaAvisoText, { color: taxaAviso.alerta ? "#B91C1C" : colors.textSecondary, fontFamily: "Inter_500Medium" }]}>{taxaAviso.texto}</Text>
+            </View>
+          )}
 
           {/* Ações */}
           <View style={styles.actionRow}>
@@ -1278,6 +1334,28 @@ export default function ClienteMotorista() {
           </ScrollView>
         )}
 
+        {passageiraMulher && (
+          <Pressable
+            onPress={() => setSomenteMulher(v => !v)}
+            style={[styles.mulherRow, { borderColor: somenteMulher ? "#EC4899" : colors.border, backgroundColor: somenteMulher ? "#EC489912" : "transparent" }]}
+          >
+            <Text style={{ fontSize: 22 }}>👩</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.mulherTitulo, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Viajar com motorista mulher</Text>
+              <Text style={[styles.mulherSub, { color: colors.textMuted, fontFamily: "Inter_400Regular" }]}>A corrida vai só para motoristas mulheres. Mesmo preço.</Text>
+            </View>
+            <Feather name={somenteMulher ? "toggle-right" : "toggle-left"} size={30} color={somenteMulher ? "#EC4899" : colors.textMuted} />
+          </Pressable>
+        )}
+        {!!taxaInfo && taxaInfo.pendente > 0 && (
+          <View style={[styles.taxaAviso, { backgroundColor: "#FEF2F2", borderColor: "#FECACA", marginTop: 0, marginBottom: 12 }]}>
+            <Feather name="alert-circle" size={14} color="#EF4444" />
+            <Text style={[styles.taxaAvisoText, { color: "#B91C1C", fontFamily: "Inter_500Medium" }]}>
+              Taxa de cancelamento pendente de R$ {taxaInfo.pendente.toFixed(2).replace(".", ",")} será somada a esta corrida.
+            </Text>
+          </View>
+        )}
+
         {/* Pagamento */}
         <View style={styles.paymentHeader}>
           <Text style={[styles.tipoLabel, { color: colors.text, fontFamily: "Inter_600SemiBold", marginBottom: 0 }]}>Pagamento</Text>
@@ -1320,7 +1398,7 @@ export default function ClienteMotorista() {
           <Feather name="navigation" size={20} color={canChamar ? "#fff" : colors.textMuted} />
           <Text style={[styles.chamarBtnText, { color: canChamar ? "#fff" : colors.textMuted, fontFamily: "Inter_700Bold" }]}>
             {canChamar
-              ? `Chamar ${tipoNome} · R$ ${preco.toFixed(2)}`
+              ? `Chamar ${tipoNome} · R$ ${(preco + (taxaInfo?.pendente || 0)).toFixed(2)}`
               : estimativaIndisponivel
                 ? "Rota indisponível"
                 : estimativaLoading
@@ -1405,6 +1483,11 @@ const styles = StyleSheet.create({
   etaMiniLabel: { fontSize: 11 },
 
   driverCard: { flexDirection: "row", alignItems: "center", gap: 12, borderRadius: 16, borderWidth: 1, padding: 14, marginBottom: 14 },
+  taxaAviso: { flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderRadius: 10, padding: 10, marginTop: 10 },
+  taxaAvisoText: { flex: 1, fontSize: 12, lineHeight: 17 },
+  mulherRow: { flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1.5, borderRadius: 14, padding: 12, marginBottom: 12 },
+  mulherTitulo: { fontSize: 14 },
+  mulherSub: { fontSize: 12, marginTop: 2 },
   driverAvatarWrap: { width: 56, height: 56, borderRadius: 28, alignItems: "center", justifyContent: "center" },
   driverInitials: { color: "#fff", fontSize: 20 },
   driverInfo: { flex: 1, gap: 4 },

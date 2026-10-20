@@ -10,6 +10,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import Colors from "@/constants/colors";
 import { useCustomerAuth } from "@/context/CustomerAuthContext";
+import { GeneroOpcoes, type Genero } from "@/components/GeneroObrigatorio";
 
 const BRAND_GREEN = "#22C55E";
 
@@ -33,6 +34,7 @@ export default function CadastroScreen() {
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
   const [codigoAfiliado, setCodigoAfiliado] = useState(params.codigo ?? "");
+  const [genero, setGenero] = useState<Genero | null>(null);
 
   const slideAnim = useRef(new Animated.Value(0)).current;
 
@@ -48,7 +50,8 @@ export default function CadastroScreen() {
     setLoading(true);
     let result: { ok: boolean; error?: string };
     if (modo === "cadastro") {
-      result = await register(nome, whatsapp, senha, codigoAfiliado.trim() || undefined);
+      if (!genero) { setLoading(false); setErro("Escolha Feminino ou Masculino."); return; }
+      result = await register(nome, whatsapp, senha, codigoAfiliado.trim() || undefined, genero);
     } else {
       result = await login(whatsapp, senha);
     }
@@ -166,6 +169,13 @@ export default function CadastroScreen() {
                   </Pressable>
                 </View>
               </View>
+
+              {modo === "cadastro" && (
+                <View>
+                  <Text style={[styles.fieldLabel, { color: colors.text, fontFamily: "Inter_500Medium" }]}>Você é</Text>
+                  <GeneroOpcoes valor={genero} onChange={setGenero} cor={BRAND_GREEN} escuro={isDark} />
+                </View>
+              )}
 
               {/* Código de afiliado (opcional) */}
               {modo === "cadastro" && (

@@ -34,6 +34,7 @@ const STATUS_LABEL: Record<string, { text: string; color: string }> = {
 };
 
 type Ativa = {
+  taxa_cancelamento?: number | string;
   id: number;
   corrida_id?: number;
   status: string;
@@ -150,6 +151,7 @@ export default function ProServicos() {
           entregaEndereco: ativa.entrega_endereco ?? "",
           categoriaName: ativa.categoria_nome ?? jobLabel,
           valorEstimado: String(ativa.valor_estimado),
+          taxaCancelamento: String(ativa.taxa_cancelamento ?? "0"),
           clienteNome: ativa.cliente_nome ?? "Cliente",
           descricaoItem: ativa.descricao_item ?? "",
           tipoServico: ativa.tipo_servico ?? tipo,
@@ -169,6 +171,7 @@ export default function ProServicos() {
           destinoEndereco: ativa.destino_endereco ?? "",
           categoriaName: ativa.categoria_nome ?? "GoTaxi",
           valorEstimado: String(ativa.valor_estimado),
+          taxaCancelamento: String(ativa.taxa_cancelamento ?? "0"),
           clienteNome: ativa.cliente_nome ?? "Cliente",
           paymentSource: ativa.paymentSource ?? ativa.source ?? ativa.payment_source ?? "direto",
           formaPagamento: ativa.forma_pagamento ?? "",

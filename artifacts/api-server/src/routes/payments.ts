@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { creditWallet } from "../lib/wallet";
 import { customerIdFromRequest } from "../lib/customerToken";
+import { ensureViagemSchema, liberarTaxasReservadas, registrarTaxaCancelamento } from "../lib/viagemMulher";
 import { broadcastToEmpresa } from "./pdv";
 
 const router: IRouter = Router();
@@ -986,6 +987,8 @@ router.post("/services/:module/:referenceId/cancel", requireCustomer, async (req
   const customerId = (req as any).customerId;
   if (!["motorista", "entrega"].includes(module) || !Number.isInteger(referenceId) || referenceId <= 0) { res.status(400).json({ error: "invalid_service_reference" }); return; }
   await ensureServicePaymentSchema();
+  if (module === "motorista") await ensureViagemSchema();
+  let taxaCancelamento = 0;
   const result = await db.transaction(async tx => {
     let paymentSource = "direto";
     if (module === "motorista") {
@@ -1012,6 +1015,8 @@ router.post("/services/:module/:referenceId/cancel", requireCustomer, async (req
         WHERE id = ${(intents.rows[0] as any).id} AND status = 'pending'`);
     }
     if (module === "motorista") {
+      taxaCancelamento = await registrarTaxaCancelamento(tx, referenceId, customerId);
+      await liberarTaxasReservadas(tx, referenceId);
       await tx.execute(sql`UPDATE corridas SET status = 'cancelada', cancelado_em = NOW() WHERE id = ${referenceId}`);
       await tx.execute(sql`UPDATE corridas_solicitadas SET status = 'cancelada' WHERE corrida_id = ${referenceId} AND status NOT IN ('finalizada','cancelada')`);
     } else {
@@ -1023,7 +1028,7 @@ router.post("/services/:module/:referenceId/cancel", requireCustomer, async (req
   if (result === "not_found") { res.status(404).json({ error: "service_not_found" }); return; }
   if (result === "not_cancellable") { res.status(409).json({ error: "service_not_cancellable" }); return; }
   if (result === "payment_not_cancellable") { res.status(409).json({ error: "payment_not_cancellable" }); return; }
-  res.json({ cancelled: true, module, referenceId });
+  res.json({ cancelled: true, module, referenceId, taxa_cancelamento: taxaCancelamento });
 });
 router.post("/webhook/mercado-pago", async (req, res) => {
   const providerObjectId = String(req.body?.data?.id ?? req.query["data.id"] ?? "");

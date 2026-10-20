@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
 import { api, formatBRL } from "@/lib/api";
 import { Users, DollarSign, TrendingUp, Wallet, Copy, Share2, ExternalLink, UserPlus } from "lucide-react";
+import { Link } from "wouter";
 import { toast } from "sonner";
 import { useState } from "react";
 
@@ -181,6 +182,13 @@ export default function Dashboard() {
               <Share2 size={16} />
               QR Code
             </button>
+            <Link
+              href="/resgates"
+              className="flex items-center gap-2 px-4 py-3 bg-amber-500 text-white rounded-xl text-sm font-medium hover:bg-amber-600 transition"
+            >
+              <Wallet size={16} />
+              Sacar saldo
+            </Link>
             <a
               href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/r/${afiliado.codigo || ""}`}
               target="_blank"

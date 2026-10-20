@@ -4,6 +4,7 @@ import { useAuth, API, authHeaders } from "@/lib/auth";
 type Usuario = {
   id: number; nome: string; email: string; papel: string;
   empresa_id?: number | null; empresa_nome?: string; criado_em: string;
+  genero?: string | null;
 };
 
 type EmpresaOpt = { id: number; nome: string };
@@ -35,6 +36,7 @@ function EditarUsuarioModal({
   const [empresaId, setEmpresaId] = useState<string>(
     usuario.empresa_id != null ? String(usuario.empresa_id) : ""
   );
+  const [genero, setGenero] = useState<string>(usuario.genero || "");
   const [novaSenha, setNovaSenha] = useState("");
   const [showSenha, setShowSenha] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -83,6 +85,7 @@ function EditarUsuarioModal({
     if (nomeT !== usuario.nome) payload.nome = nomeT;
     if (emailT !== emailOriginal) payload.email = emailT;
     if (papel !== usuario.papel) payload.papel = papel;
+    if (genero !== (usuario.genero || "")) payload.genero = genero || null;
     if (empresaId !== empresaOriginalId) {
       payload.empresa_id = empresaId ? Number(empresaId) : null;
     }
@@ -123,6 +126,7 @@ function EditarUsuarioModal({
         nome: nomeT,
         email: emailT,
         papel,
+        genero: genero || null,
         empresa_id: empresaId ? Number(empresaId) : null,
         empresa_nome: novaEmpresa?.nome ?? (empresaId ? usuario.empresa_nome : undefined),
       });
@@ -200,6 +204,20 @@ function EditarUsuarioModal({
                 ))}
               </select>
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-foreground/80 mb-1.5">Gênero</label>
+            <select
+              value={genero}
+              onChange={(e) => setGenero(e.target.value)}
+              className="w-full bg-input border border-border rounded-lg px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+            >
+              <option value="">— Não informado —</option>
+              <option value="feminino">Feminino</option>
+              <option value="masculino">Masculino</option>
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">Só "Feminino" vê a opção de viajar com motorista mulher.</p>
           </div>
 
           <div className="pt-4 mt-2 border-t border-border">
@@ -365,7 +383,7 @@ export default function Usuarios() {
                       </div>
                       <div>
                         <p className="font-semibold text-sm text-foreground">{u.nome}</p>
-                        <p className="text-xs text-muted-foreground">{u.email}</p>
+                        <p className="text-xs text-muted-foreground">{u.email}{u.genero ? ` · ${u.genero === "feminino" ? "Feminino" : "Masculino"}` : ""}</p>
                       </div>
                     </div>
                   </td>

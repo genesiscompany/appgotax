@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  RefreshControl, StatusBar, Animated, Pressable,
+  RefreshControl, StatusBar, Animated, Pressable, Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useFocusEffect } from "expo-router";
@@ -173,7 +173,16 @@ export default function ProInicio() {
           )}
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <Pressable
-              onPress={() => setOnline(v => !v)}
+              onPress={() => {
+                if (!online && tipo === "motorista" && !proUser?.foto) {
+                  Alert.alert("Foto obrigatória", "Envie sua foto de perfil para ficar online.", [
+                    { text: "Agora não", style: "cancel" },
+                    { text: "Enviar foto", onPress: () => router.push("/pro/(tabs)/perfil" as any) },
+                  ]);
+                  return;
+                }
+                setOnline(v => !v);
+              }}
               style={({ pressed }) => [
                 styles.onlineBtn,
                 { backgroundColor: online ? cor : "#1A1A1A", borderColor: online ? cor : "#333" },

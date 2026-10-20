@@ -52,6 +52,7 @@ export default function CorridaAtiva() {
     destinoEndereco: string;
     categoriaName: string;
     valorEstimado: string;
+    taxaCancelamento?: string;
     clienteNome: string;
     paymentSource: string;
     formaPagamento: string;
@@ -483,6 +484,9 @@ export default function CorridaAtiva() {
           </View>
           <Text style={s.clienteNome}>{params.clienteNome}</Text>
           <Text style={s.valorText}>R$ {Number(params.valorEstimado).toFixed(2).replace(".", ",")}</Text>
+          {Number(params.taxaCancelamento) > 0 && (
+            <Text style={s.taxaInfo}>Inclui R$ {Number(params.taxaCancelamento).toFixed(2).replace(".", ",")} de taxa de cancelamento</Text>
+          )}
           <TouchableOpacity style={s.chatBtn} onPress={() => setChatVisible(true)}>
             <Text style={s.chatBtnIcon}>💬</Text>
             {msgNaoLidas > 0 && (
@@ -797,6 +801,7 @@ const s = StyleSheet.create({
   categoryBadge: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
   categoryText: { fontSize: 12, fontWeight: "800" },
   clienteNome: { flex: 1, fontSize: 14, fontWeight: "700", color: "#fff" },
+  taxaInfo: { fontSize: 11, color: "#F59E0B", marginTop: 2 },
   valorText: { fontSize: 20, fontWeight: "900", color: "#fff" },
   paymentStatus: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 2, borderWidth: 1 },
   paymentDirect: { backgroundColor: "#F59E0B16", borderColor: "#F59E0B45" },

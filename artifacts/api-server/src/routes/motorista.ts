@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { customerIdFromRequest } from "../lib/customerToken";
 import { roadRoute } from "../lib/roadDistance";
 import { ensureDestinoMotorista, destinoCompativelSql } from "../lib/motoristaDestino";
+import { configCancelamento, ensureViagemSchema, filtroGeneroSql, generoDoUsuario, reservarTaxas, taxasPendentesDoCliente } from "../lib/viagemMulher";
 
 const router: IRouter = Router();
 
@@ -71,7 +72,7 @@ function estimaEspera(tipo: string): number {
 // ── POST /api/motorista/estimativa — mesma regra de preço do /solicitar ─────
 router.post("/estimativa", async (req, res) => {
   try {
-    const { lat_origem, lng_origem, lat_destino, lng_destino, categoria_nome, payment_source } = req.body;
+    const { lat_origem, lng_origem, lat_destino, lng_destino, categoria_nome, payment_source, somente_mulher } = req.body;
     const coords = [lat_origem, lng_origem, lat_destino, lng_destino].map(Number);
     const validCoords = coords.every(Number.isFinite)
       && Math.abs(coords[0]) <= 90 && Math.abs(coords[2]) <= 90
@@ -88,6 +89,9 @@ router.post("/estimativa", async (req, res) => {
     const tripKm = Math.max(0.1, Math.round(route.km * 100) / 100);
 
     await ensureDestinoMotorista();
+    await ensureViagemSchema();
+    const passageiraMulherEst = (await generoDoUsuario(customerIdFromRequest(req))) === "feminino";
+    const filtroGeneroEst = filtroGeneroSql(passageiraMulherEst, passageiraMulherEst && somente_mulher === true);
     const nearestRows = await db.execute(`
       SELECT (6371 * acos(LEAST(1.0,
         cos(radians(${coords[0]})) * cos(radians(ma.lat)) *
@@ -104,6 +108,7 @@ router.post("/estimativa", async (req, res) => {
         )
         AND EXISTS (SELECT 1 FROM motorista_categorias mc WHERE mc.motorista_id = ma.id AND mc.categoria_nome = '${esc(categoria)}')
         AND ${destinoCompativelSql(coords[2], coords[3])}
+        ${filtroGeneroEst}
       ORDER BY distancia_motorista_km ASC LIMIT 1
     `);
     const pickupKm = Math.max(0, Number((nearestRows.rows[0] as any)?.distancia_motorista_km ?? 0));
@@ -122,6 +127,17 @@ router.post("/estimativa", async (req, res) => {
   }
 });
 
+// ── GET /api/motorista/taxa-cancelamento — regra atual e taxa pendente do passageiro ──
+router.get("/taxa-cancelamento", async (req, res) => {
+  try {
+    const clienteId = customerIdFromRequest(req);
+    if (!clienteId) return res.status(401).json({ error: "signed_customer_token_required" });
+    const cfg = await configCancelamento();
+    const pend = await taxasPendentesDoCliente(clienteId);
+    return res.json({ valor: cfg.valor, minutos: cfg.minutos, pendente: pend.total });
+  } catch (err) { console.error("[taxa-cancelamento]", err); return res.status(500).json({ error: "server_error" }); }
+});
+
 // ── POST /api/motorista/solicitar ────────────────────────────────────────────
 router.post("/solicitar", async (req, res) => {
   try {
@@ -129,7 +145,7 @@ router.post("/solicitar", async (req, res) => {
       empresa_id, passageiro_nome, passageiro_telefone,
       origem_endereco, destino_endereco, tipo_veiculo, categoria_nome,
       forma_pagamento, payment_source,
-      lat_origem, lng_origem, lat_destino, lng_destino, observacoes,
+      lat_origem, lng_origem, lat_destino, lng_destino, observacoes, somente_mulher,
     } = req.body;
     const empresaId = Number(empresa_id || 1);
     // Whitelist enum-like fields to prevent SQL injection (these are interpolated into raw SQL below)
@@ -163,6 +179,13 @@ router.post("/solicitar", async (req, res) => {
     const tripKm = quotedKm;
     let pickupKm = 0;
     let selectedDriver: any = null;
+    await ensureViagemSchema();
+    const passageiraMulher = (await generoDoUsuario(customerIdFromRequest(req))) === "feminino";
+    const somenteMulher = somente_mulher === true;
+    if (somenteMulher && !passageiraMulher) {
+      return res.status(403).json({ error: "somente_mulher_indisponivel", message: "A opção motorista mulher é exclusiva para passageiras." });
+    }
+    const filtroGenero = filtroGeneroSql(passageiraMulher, somenteMulher);
     if (validCoords && requestedCategory) {
       await ensureDestinoMotorista();
       const nearestRows = await db.execute(`
@@ -189,11 +212,15 @@ router.post("/solicitar", async (req, res) => {
               AND mc.categoria_nome = '${esc(requestedCategory)}'
           )
           AND ${destinoCompativelSql(coords[2], coords[3])}
+          ${filtroGenero}
         ORDER BY distancia_motorista_km ASC
         LIMIT 1
       `);
       selectedDriver = nearestRows.rows[0] as any;
       pickupKm = Math.max(0, Number(selectedDriver?.distancia_motorista_km ?? 0));
+    }
+    if (!selectedDriver && somenteMulher) {
+      return res.status(409).json({ error: "no_female_driver_available", message: "Nenhuma motorista mulher disponível agora. Tente de novo em instantes ou desligue a opção para chamar qualquer motorista." });
     }
     if (!selectedDriver) {
       return res.status(409).json({ error: "no_driver_available", message: "Nenhum motorista disponível para esta categoria e forma de pagamento" });
@@ -212,6 +239,9 @@ router.post("/solicitar", async (req, res) => {
       return res.status(401).json({ error: "signed_customer_token_required" });
     }
     await db.execute(sql`ALTER TABLE corridas ADD COLUMN IF NOT EXISTS customer_id INTEGER`);
+    // Taxas de cancelamento pendentes entram nesta corrida
+    const taxasPendentes = await taxasPendentesDoCliente(clienteId);
+    const valorTotal = Math.round((valorFinal + taxasPendentes.total) * 100) / 100;
     // Handle Crédito GoTaxi payment: deduct from credito_aplicativo before creating ride
     let creditoDescontado = 0;
     if (forma_pagamento === "credito_gotaxi" && paymentSource !== "wallet") {
@@ -220,7 +250,7 @@ router.post("/solicitar", async (req, res) => {
 
       const userRows = (await db.execute(sql`SELECT credito_aplicativo FROM usuarios WHERE id = ${clienteId}`)).rows as any[];
       const saldoCredito = Number(userRows[0]?.credito_aplicativo ?? 0);
-      const valorCorrida = Number(valorFinal);
+      const valorCorrida = Number(valorTotal);
       if (saldoCredito < valorCorrida) {
         return res.status(400).json({ error: "credito_insuficiente", message: `Saldo insuficiente. Disponível: R$ ${saldoCredito.toFixed(2)}` });
       }
@@ -234,7 +264,8 @@ router.post("/solicitar", async (req, res) => {
          empresa_id, customer_id, passageiro_nome, passageiro_telefone,
         origem_endereco, destino_endereco, tipo_veiculo,
          forma_pagamento, payment_source, distancia_km, valor, status, tempo_espera_min,
-        lat_origem, lng_origem, lat_destino, lng_destino, observacoes
+        lat_origem, lng_origem, lat_destino, lng_destino, observacoes,
+        somente_mulher, taxa_cancelamento_cobrada
       ) VALUES (
          ${empresaId}, ${clienteId ?? "NULL"},
         '${esc(String(passageiro_nome || "Cliente"))}',
@@ -244,14 +275,16 @@ router.post("/solicitar", async (req, res) => {
         '${tipoSafe}',
         '${pagSafe}',
          '${paymentSource}',
-        ${km}, ${Number(valorFinal)}, 'aguardando',
+        ${km}, ${Number(valorTotal)}, 'aguardando',
         ${estimaEspera(tipoSafe)},
         ${lat_origem ?? "NULL"}, ${lng_origem ?? "NULL"},
         ${lat_destino ?? "NULL"}, ${lng_destino ?? "NULL"},
-        ${observacoes ? `'${esc(String(observacoes))}'` : "NULL"}
+        ${observacoes ? `'${esc(String(observacoes))}'` : "NULL"},
+        ${somenteMulher}, ${taxasPendentes.total}
       ) RETURNING *
     `);
     const corrida = rows.rows[0] as any;
+    await reservarTaxas(taxasPendentes.ids, Number(corrida.id));
 
     // ── Dispatch to nearest online driver (motoristas_app) ──────────────────
     if (lat_origem != null && lng_origem != null) {
@@ -275,11 +308,11 @@ router.post("/solicitar", async (req, res) => {
               distancia_viagem_km, tempo_viagem_min,
               lat_origem, lng_origem, lat_destino, lng_destino,
                cliente_nome, forma_pagamento, payment_source,
-              status, expira_em
+              status, expira_em, taxa_cancelamento
             ) VALUES (
               ${driver.id}, ${corrida.id}, 'corrida',
               '${esc(String(categoria_nome || tipo_veiculo || "GoTaxi X"))}',
-              ${Number(valorFinal)},
+              ${Number(valorTotal)},
               '${esc(String(origem_endereco || ""))}',
               '${esc(String(destino_endereco || ""))}',
               ${distMotorista.toFixed(2)}, ${tempoMotoristaMin},
@@ -290,7 +323,7 @@ router.post("/solicitar", async (req, res) => {
               '${esc(String(passageiro_nome || "Passageiro"))}',
               '${pagSafe}',
                '${paymentSource}',
-              'aguardando', NOW() + INTERVAL '60 seconds'
+              'aguardando', NOW() + INTERVAL '60 seconds', ${taxasPendentes.total}
             )
           `);
 
@@ -387,6 +420,14 @@ router.get("/corridas/:id", async (req, res) => {
       row.motorista_avaliacao = row.ma_avaliacao;
       row.motorista_lat = row.ma_lat;
       row.motorista_lng = row.ma_lng;
+    }
+    const cfgCanc = await configCancelamento();
+    row.taxa_cancelamento_valor = cfgCanc.valor;
+    row.taxa_cancelamento_minutos = cfgCanc.minutos;
+    row.taxa_cancelamento_segundos = null;
+    if (row.aceita_em && ["aceita", "a_caminho"].includes(String(row.status))) {
+      const r = (await db.execute(sql`SELECT GREATEST(0, EXTRACT(EPOCH FROM (aceita_em + (${cfgCanc.minutos}::numeric * INTERVAL '1 minute') - NOW())))::int AS s FROM corridas WHERE id = ${Number(row.id)}`)).rows[0] as any;
+      row.taxa_cancelamento_segundos = Number(r?.s ?? 0);
     }
     return res.json(row);
   } catch (err) { console.error(err); return res.status(500).json({ error: "server_error" }); }
