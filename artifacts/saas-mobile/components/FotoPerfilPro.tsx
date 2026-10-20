@@ -7,6 +7,37 @@ const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
   ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`
   : "/api";
 
+async function enviarFoto(token: string, asset: ImagePicker.ImagePickerAsset) {
+  const formData = new FormData();
+  if (Platform.OS === "web") {
+    const blob = await (await globalThis.fetch(asset.uri)).blob();
+    formData.append("file", blob, "foto.jpg");
+  } else {
+    formData.append("file", { uri: asset.uri, name: "foto.jpg", type: asset.mimeType || "image/jpeg" } as any);
+  }
+  const res = await globalThis.fetch(`${API_BASE}/motorista-app/foto`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+  const data = await res.json().catch(() => ({}));
+  return res.ok ? null : (data.error || "Não foi possível enviar a foto.");
+}
+
+/** No Android o sistema pode fechar o app enquanto a câmera está aberta; ao reabrir, recupera a foto tirada. */
+export async function recuperarFotoPendente(token: string): Promise<boolean> {
+  if (Platform.OS !== "android") return false;
+  try {
+    const pend = await ImagePicker.getPendingResultAsync();
+    const r = Array.isArray(pend) ? pend[0] : pend;
+    const asset = r && "assets" in r && !r.canceled ? r.assets?.[0] : null;
+    if (!asset) return false;
+    return (await enviarFoto(token, asset)) === null;
+  } catch {
+    return false;
+  }
+}
+
 export default function FotoPerfilPro({ token, foto, cor, onAtualizado }: {
   token: string; foto?: string | null; cor: string; onAtualizado: () => Promise<void>;
 }) {
@@ -25,26 +56,14 @@ export default function FotoPerfilPro({ token, foto, cor, onAtualizado }: {
         }
       }
       const opts: ImagePicker.ImagePickerOptions = {
-        mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7, allowsEditing: true, aspect: [1, 1],
+        mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.5,
       };
       const result = camera ? await ImagePicker.launchCameraAsync(opts) : await ImagePicker.launchImageLibraryAsync(opts);
       if (result.canceled || !result.assets?.[0]) return;
       const asset = result.assets[0];
       setEnviando(true);
-      const formData = new FormData();
-      if (Platform.OS === "web") {
-        const blob = await (await globalThis.fetch(asset.uri)).blob();
-        formData.append("file", blob, "foto.jpg");
-      } else {
-        formData.append("file", { uri: asset.uri, name: "foto.jpg", type: asset.mimeType || "image/jpeg" } as any);
-      }
-      const res = await globalThis.fetch(`${API_BASE}/motorista-app/foto`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { Alert.alert("Erro", data.error || "Não foi possível enviar a foto."); return; }
+      const erro = await enviarFoto(token, asset);
+      if (erro) { Alert.alert("Erro", erro); return; }
       await onAtualizado();
       Alert.alert("✅ Foto salva!", "Os passageiros vão ver esta foto quando você aceitar uma corrida.");
     } catch {

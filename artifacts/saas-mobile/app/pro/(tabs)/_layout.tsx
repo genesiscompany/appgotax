@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useProAuth, PRO_COLORS, PRO_JOB, PRO_ICONS } from "@/context/ProAuthContext";
 import RideRequestOverlay from "@/components/RideRequestOverlay";
 import GeneroProGate from "@/components/GeneroProGate";
+import { recuperarFotoPendente } from "@/components/FotoPerfilPro";
 
 const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
   ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api`
@@ -99,7 +100,17 @@ async function registerExpoBroadcastToken(proToken: string): Promise<void> {
 }
 
 export default function ProTabsLayout() {
-  const { proUser, online } = useProAuth();
+  const { proUser, online, refreshPerfil } = useProAuth();
+
+  useEffect(() => {
+    if (!proUser?.token) return;
+    recuperarFotoPendente(proUser.token).then(ok => {
+      if (!ok) return;
+      refreshPerfil();
+      Alert.alert("✅ Foto salva!", "Sua foto de perfil foi enviada.");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proUser?.token]);
   const tipo = proUser?.tipo_profissional || "motorista";
   const insets = useSafeAreaInsets();
   const cor = PRO_COLORS[tipo];

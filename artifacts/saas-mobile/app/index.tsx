@@ -43,7 +43,7 @@ export default function LauncherScreen() {
         <TouchableOpacity
           style={[styles.card, styles.cardPro]}
           activeOpacity={0.85}
-          onPress={() => router.push("/pro/bem-vindo" as any)}
+          onPress={() => router.push("/pro" as any)}
         >
           <View style={[styles.iconBox, { backgroundColor: "#F5C51822" }]}>
             <Text style={styles.cardEmoji}>⚡</Text>
