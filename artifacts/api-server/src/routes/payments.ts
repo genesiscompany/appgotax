@@ -238,7 +238,7 @@ export async function settleServiceEarning(module: "motorista" | "entrega", refe
     const source = module === "motorista"
       ? await tx.execute(sql`SELECT cs.motorista_id AS professional_id, cs.valor_estimado AS amount, ma.percentual_repasse
           FROM corridas_solicitadas cs JOIN motoristas_app ma ON ma.id = cs.motorista_id WHERE cs.corrida_id = ${Number(referenceId)} AND cs.status = 'finalizada' FOR UPDATE`)
-      : await tx.execute(sql`SELECT es.profissional_id, es.valor_estimado AS amount, ma.percentual_repasse
+      : await tx.execute(sql`SELECT es.profissional_id AS professional_id, es.valor_estimado AS amount, ma.percentual_repasse
           FROM entregas_solicitadas es JOIN motoristas_app ma ON ma.id = es.profissional_id WHERE es.entrega_id = ${Number(referenceId)} AND es.status = 'finalizada' FOR UPDATE`);
     const row = source.rows[0] as any;
     if (!row) throw new Error("service_professional_not_found");

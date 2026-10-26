@@ -187,17 +187,15 @@ export default function ClienteMotorista() {
   const topPadding = insets.top;
 
   useEffect(() => {
-    if (customer?.formaPagamento) {
+    if (customer?.formaPagamento && customer.formaPagamento !== "pix_app") {
       setPagamento(
         customer.formaPagamento === "pix" || customer.formaPagamento === "pix_direto"
           ? "pix_direto"
-          : customer.formaPagamento === "pix_app"
-            ? "pix_app"
-            : customer.formaPagamento === "cartao"
-              ? "card_app"
-              : customer.formaPagamento === "wallet"
-                ? "wallet"
-                : customer.formaPagamento,
+          : customer.formaPagamento === "cartao"
+            ? "card_app"
+            : customer.formaPagamento === "wallet"
+              ? "wallet"
+              : customer.formaPagamento,
       );
     }
   }, [customer?.formaPagamento]);
@@ -213,9 +211,10 @@ export default function ClienteMotorista() {
         setPaymentOptions(options);
         setPagamento(current => {
           const isDirect = current === "dinheiro" || current === "pix_direto" || current === "maquininha";
-          if ((isDirect && options.receber_direto) || ((current === "pix_app" || current === "card_app") && options.mercado_pago) || (current === "wallet" && options.carteira)) return current;
-          if (options.mercado_pago) return "pix_app";
+          if ((isDirect && options.receber_direto) || (current === "card_app" && options.mercado_pago) || (current === "wallet" && options.carteira)) return current;
           if (options.carteira) return "wallet";
+          if (options.receber_direto) return "dinheiro";
+          if (options.mercado_pago) return "card_app";
           return "dinheiro";
         });
       })

@@ -113,7 +113,7 @@ export default function ClienteEntrega() {
   const [savedCardTokenizerVisible, setSavedCardTokenizerVisible] = useState(false);
 
   useEffect(() => {
-    if (customer?.formaPagamento) {
+    if (customer?.formaPagamento && customer.formaPagamento !== "pix_app") {
       setFormaPagamento(customer.formaPagamento === "pix" ? "pix_direto" : customer.formaPagamento === "cartao" ? "card_app" : customer.formaPagamento);
     }
   }, [customer?.formaPagamento]);
@@ -129,9 +129,10 @@ export default function ClienteEntrega() {
         setPaymentOptions(options);
         setFormaPagamento(current => {
           const isDirect = current === "dinheiro" || current === "pix_direto" || current === "maquininha";
-          if ((isDirect && options.receber_direto) || ((current === "pix_app" || current === "card_app") && options.mercado_pago) || (current === "wallet" && options.carteira)) return current;
-          if (options.mercado_pago) return "pix_app";
+          if ((isDirect && options.receber_direto) || (current === "card_app" && options.mercado_pago) || (current === "wallet" && options.carteira)) return current;
           if (options.carteira) return "wallet";
+          if (options.receber_direto) return "dinheiro";
+          if (options.mercado_pago) return "card_app";
           return "dinheiro";
         });
       })
@@ -1049,7 +1050,6 @@ export default function ClienteEntrega() {
                     { id: "pix_direto", label: "Pix direto" },
                     { id: "maquininha", label: "Maquininha" },
                   ] : []),
-                  ...(paymentOptions.mercado_pago ? [{ id: "pix_app", label: "Pix pelo app" }] : []),
                   ...(paymentOptions.mercado_pago && savedCard ? [{ id: "card_app", label: `Cartão •••• ${savedCard.lastFour}` }] : []),
                   ...(paymentOptions.carteira ? [{ id: "wallet", label: "Carteira" }] : []),
                 ] as { id: PaymentChoice; label: string }[]).map(option => (

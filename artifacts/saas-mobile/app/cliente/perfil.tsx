@@ -32,7 +32,6 @@ const PAGAMENTOS_DIRETOS: FormaPagamentoOption[] = [
 ];
 
 const PAGAMENTOS_PELO_APP: FormaPagamentoOption[] = [
-  { id: "pix_app",   label: "Pix pelo app", icon: "smartphone",  color: "#22C55E", desc: "Cobrança processada pelo Mercado Pago" },
   { id: "cartao",    label: "Cartão salvo", icon: "credit-card", color: "#009EE3", desc: "Cobrança segura pelo app" },
   { id: "wallet",    label: "Carteira",     icon: "briefcase",   color: "#8B5CF6", desc: "Use o saldo da Carteira GoTaxi" },
 ];

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity, Alert,
   ActivityIndicator, Platform, StatusBar, Image,
-  Modal, FlatList, KeyboardAvoidingView, TextInput, Pressable,
+  Modal, FlatList, KeyboardAvoidingView, TextInput, Pressable, Linking,
 } from "react-native";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, Region } from "react-native-maps";
 import * as Location from "expo-location";
@@ -336,6 +336,7 @@ export default function CorridaAtiva() {
       });
     } catch (_) {}
     setChegouDestino(true);
+    if (isPixDireto) setMostrarPix(true);
     setActionLoading(false);
   };
 
@@ -379,6 +380,33 @@ export default function CorridaAtiva() {
     : ["pending", "in_process"].includes(paymentInfo.status) ? "pendente"
       : paymentInfo.status;
   const isPixDireto = paymentSource === "direto" && paymentMethod.includes("pix");
+
+  const abrirNavegacao = () => {
+    const alvo = destCoords
+      ? `${destCoords.lat},${destCoords.lng}`
+      : (destAddress || "");
+    if (!alvo) {
+      Alert.alert("Endereço indisponível", "Não foi possível obter o endereço para navegar.");
+      return;
+    }
+    const q = encodeURIComponent(alvo);
+    const abrir = (url: string) =>
+      Linking.openURL(url).catch(() => Alert.alert("Erro", "Não foi possível abrir o aplicativo de navegação."));
+    const google = () => abrir(`https://www.google.com/maps/dir/?api=1&destination=${q}&travelmode=driving`);
+    const waze = () => abrir(
+      destCoords ? `https://waze.com/ul?ll=${q}&navigate=yes` : `https://waze.com/ul?q=${q}&navigate=yes`
+    );
+    if (Platform.OS === "web") { google(); return; }
+    Alert.alert(
+      fase === "embarque" ? "Navegar até o passageiro" : "Navegar até o destino",
+      "Escolha o aplicativo",
+      [
+        { text: "Google Maps", onPress: google },
+        { text: "Waze", onPress: waze },
+        { text: "Cancelar", style: "cancel" },
+      ],
+    );
+  };
   const pagamentoNoApp = paymentSource === "mercado_pago" || paymentSource === "wallet";
   const pagamentoPago = pagamentoNoApp && paymentStatus === "pago";
   const paymentLabel = pagamentoPago
@@ -510,6 +538,12 @@ export default function CorridaAtiva() {
             <Text style={s.addrText} numberOfLines={2}>{destAddress}</Text>
           </View>
         </View>
+
+        <TouchableOpacity style={s.navBtn} onPress={abrirNavegacao} activeOpacity={0.8}>
+          <Text style={s.navBtnTxt}>
+            🧭 {fase === "embarque" ? "Navegar até o passageiro" : "Navegar até o destino"}
+          </Text>
+        </TouchableOpacity>
 
         {/* Progress steps */}
         <View style={s.steps}>
@@ -866,6 +900,11 @@ const s = StyleSheet.create({
   pixCopyTxt: { fontSize: 12, fontWeight: "700", color: "#fff" },
   pixBankImg: { width: "100%", height: 80, borderRadius: 8 },
   pixBankBadge: { width: 80, height: 28, marginTop: 4, alignSelf: "flex-start" },
+  navBtn: {
+    backgroundColor: "#1A73E8", borderRadius: 12, paddingVertical: 12,
+    alignItems: "center",
+  },
+  navBtnTxt: { fontSize: 14, fontWeight: "700", color: "#fff" },
   pixToggleBtn: {
     backgroundColor: "#1F1F1F", borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16,
     alignItems: "center", borderWidth: 1, borderColor: "#7C3AED55",
