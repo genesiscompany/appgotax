@@ -1495,6 +1495,7 @@ router.get("/corrida-pendente", async (req: Request, res: Response) => {
         AND (
           (COALESCE(cs.payment_source, 'direto') = 'direto' AND ma.aceita_pagamento_direto = true)
           OR (cs.payment_source = 'mercado_pago' AND ma.aceita_pagamento_app = true AND EXISTS (SELECT 1 FROM motorista_mercado_pago_connections mp WHERE mp.motorista_id = ma.id AND mp.status = 'active' AND (mp.expires_at > NOW() OR mp.encrypted_refresh_token IS NOT NULL)))
+          OR (cs.payment_source = 'wallet' AND ma.aceita_pagamento_app = true)
         )
       ORDER BY criado_em DESC LIMIT 1
     `));
