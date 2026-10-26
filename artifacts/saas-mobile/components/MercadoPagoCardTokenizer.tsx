@@ -182,6 +182,10 @@ function tokenizerHtml(publicKey: string, sandbox: boolean, mode: "register" | "
 </html>`;
 }
 
+// Os campos seguros do Mercado Pago (iframes) precisam de uma origem https e de
+// armazenamento do navegador; sem isso ficam visíveis mas não aceitam digitação.
+const TOKENIZER_BASE_URL = `https://${process.env.EXPO_PUBLIC_DOMAIN || "gotaxi.com.br"}/`;
+
 export default function MercadoPagoCardTokenizer({ visible, publicKey, sandbox, mode = "register", cardId, onClose, onToken }: Props) {
   const insets = useSafeAreaInsets();
   const html = useMemo(() => tokenizerHtml(publicKey, sandbox, mode, cardId), [publicKey, sandbox, mode, cardId]);
@@ -220,11 +224,13 @@ export default function MercadoPagoCardTokenizer({ visible, publicKey, sandbox, 
           </View>
         ) : (
           <WebView
-            source={{ html }}
+            source={{ html, baseUrl: TOKENIZER_BASE_URL }}
             originWhitelist={["https://*", "about:*"]}
             javaScriptEnabled
-            domStorageEnabled={false}
-            thirdPartyCookiesEnabled={false}
+            domStorageEnabled
+            thirdPartyCookiesEnabled
+            mixedContentMode="never"
+            setSupportMultipleWindows={false}
             onMessage={handleMessage}
             startInLoadingState
             renderLoading={() => (
