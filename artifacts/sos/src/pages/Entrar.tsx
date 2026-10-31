@@ -6,8 +6,8 @@ import CentroForm, { type CentroCampos } from "@/components/CentroForm";
 import { api, setToken } from "@/lib/api";
 
 export default function Entrar() {
-  const [, navigate] = useLocation();
-  const [aba, setAba] = useState<"login" | "cadastro">("login");
+  const [location, navigate] = useLocation();
+  const [aba, setAba] = useState<"login" | "cadastro">(location.startsWith("/cadastro") ? "cadastro" : "login");
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
   const [form, setForm] = useState<CentroCampos>({});

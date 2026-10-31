@@ -18,6 +18,8 @@ export default function App() {
         <Route path="/" component={Publico} />
         <Route path="/doar" component={Publico} />
         <Route path="/entrar" component={Entrar} />
+        <Route path="/login" component={Entrar} />
+        <Route path="/cadastro" component={Entrar} />
         <Route path="/painel" component={Protegido} />
         <Route path="/painel/*" component={Protegido} />
         <Route><Redirect to="/" /></Route>

@@ -48,7 +48,7 @@ export default function Publico() {
       <header className="bg-gradient-to-br from-sos to-sos-dark text-white">
         <div className="max-w-5xl mx-auto px-4 py-5 flex items-center justify-between gap-3">
           <Logo claro />
-          {!embutido && <Link href="/entrar" className="text-sm font-semibold bg-white/15 hover:bg-white/25 px-3 py-2 rounded-xl">Sou um centro</Link>}
+          {!embutido && <Link href="/entrar" className="text-sm font-semibold bg-white/15 hover:bg-white/25 px-3 py-2 rounded-xl">Área do centro</Link>}
         </div>
         <div className="max-w-5xl mx-auto px-4 pb-10 pt-4">
           <h1 className="text-3xl sm:text-4xl font-extrabold leading-tight">Ajude quem está recomeçando</h1>
@@ -56,6 +56,7 @@ export default function Publico() {
           <div className="mt-6 flex flex-wrap gap-3">
             <button onClick={() => setDoarDinheiro(true)} className="inline-flex items-center gap-2 bg-white text-sos font-bold px-5 py-3 rounded-xl shadow-lg"><Heart size={18} /> Doar dinheiro (PIX)</button>
             <a href="#centros" className="inline-flex items-center gap-2 border border-white/40 font-semibold px-5 py-3 rounded-xl"><HandHeart size={18} /> Doar itens</a>
+            {!embutido && <Link href="/cadastro" className="inline-flex items-center gap-2 border border-white/40 font-semibold px-5 py-3 rounded-xl"><Building2 size={18} /> Cadastrar meu centro / ONG</Link>}
           </div>
         </div>
       </header>
