@@ -131,7 +131,7 @@ router.get("/empresas", requireAdmin, async (_req, res) => {
       LEFT JOIN LATERAL (
         SELECT id, nome, email
         FROM usuarios
-        WHERE empresa_id = e.id
+        WHERE empresa_id = e.id AND papel <> 'admin'
         ORDER BY (papel = 'parceiro') DESC, criado_em ASC
         LIMIT 1
       ) up ON true
