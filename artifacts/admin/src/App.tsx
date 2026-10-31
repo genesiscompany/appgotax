@@ -42,6 +42,7 @@ import Videos from "@/pages/Videos";
 import ConfiguracoesSistema from "@/pages/ConfiguracoesSistema";
 import CaronasConfig from "@/pages/CaronasConfig";
 import Suporte from "@/pages/Suporte";
+import Sos from "@/pages/Sos";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient();
@@ -101,6 +102,7 @@ function AppRoutes() {
         <Route path="/configuracoes-sistema" component={ConfiguracoesSistema} />
         <Route path="/caronas-config" component={CaronasConfig} />
         <Route path="/suporte" component={Suporte} />
+        <Route path="/sos" component={Sos} />
         <Route path="/modulos" component={Modulos} />
         <Route path="/configuracoes" component={Configuracoes} />
         <Route component={NotFound} />

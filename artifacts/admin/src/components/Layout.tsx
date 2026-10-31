@@ -526,6 +526,18 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </a>
           </Link>
 
+          <Link href="/sos">
+            <a onClick={closeSidebar}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                location.startsWith("/sos") ? "bg-primary/15 text-primary" : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+              }`}>
+              <span className={location.startsWith("/sos") ? "text-primary" : "text-muted-foreground"}>
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z"/></svg>
+              </span>
+              SOS GoTaxi
+            </a>
+          </Link>
+
           {/* ── Sistema ────────────────────── */}
           <div className="pt-3 pb-1">
             <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest px-3 mb-2">Sistema</p>
